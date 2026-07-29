@@ -7,6 +7,16 @@ import {
   rollbackRevision,
   selectInstance,
 } from "../lib/demo-engine.ts";
+import {
+  DEFAULT_WIZARD_INPUT,
+  DEPLOYMENT_STAGE_COPY,
+  INVESTMENT_OUTCOMES,
+  deriveOverviewMetrics,
+  environmentFilterOptions,
+  filterEnvironments,
+  validateWizardStep,
+} from "../lib/view-models.ts";
+import type { Environment } from "../lib/types.ts";
 
 test("selectInstance keeps demo-user-1024 on ins-a across repeated calls", () => {
   const instances = [
@@ -625,4 +635,180 @@ test("getNextDemoStep advances, wraps, and resets unknown progress", async () =>
   );
   assert.deepEqual(getNextDemoStep(), DEMO_STEPS[0]);
   assert.deepEqual(getNextDemoStep("not-a-step"), DEMO_STEPS[0]);
+});
+
+const FILTER_ENVIRONMENTS: Environment[] = [
+  {
+    id: "env-customer-prod",
+    name: "Customer Agent Production",
+    project: "customer-service",
+    owner: "CX Platform",
+    status: "Running",
+    endpoint: "https://customer.example.test",
+    desiredRevisionId: "rev-3",
+    readyInstances: 2,
+    desiredInstances: 2,
+    runtimePlanId: "runtime-balanced",
+    ingressProfileId: "ingress-private",
+    egressProfileId: "egress-restricted",
+  },
+  {
+    id: "env-claims-prod",
+    name: "Claims Assistant",
+    project: "claims",
+    owner: "Claims Platform",
+    status: "Degraded",
+    endpoint: "https://claims.example.test",
+    desiredRevisionId: "rev-2",
+    readyInstances: 1,
+    desiredInstances: 2,
+    runtimePlanId: "runtime-high-memory",
+    ingressProfileId: "ingress-private",
+    egressProfileId: "egress-restricted",
+  },
+  {
+    id: "env-customer-staging",
+    name: "Customer Agent Staging",
+    project: "customer-service",
+    owner: "CX Platform",
+    status: "Running",
+    endpoint: "",
+    desiredRevisionId: "rev-1",
+    readyInstances: 1,
+    desiredInstances: 1,
+    runtimePlanId: "runtime-balanced",
+    ingressProfileId: "ingress-private",
+    egressProfileId: "egress-restricted",
+  },
+];
+
+test("filterEnvironments combines a trimmed case-insensitive query with exact filters in stable order", () => {
+  const result = filterEnvironments(FILTER_ENVIRONMENTS, {
+    query: "  CUSTOMER AGENT  ",
+    status: "Running",
+    project: "customer-service",
+    runtimePlanId: "runtime-balanced",
+  });
+
+  assert.deepEqual(
+    result.map((environment) => environment.id),
+    ["env-customer-prod", "env-customer-staging"],
+  );
+  assert.equal(result[0], FILTER_ENVIRONMENTS[0]);
+  assert.equal(result[1], FILTER_ENVIRONMENTS[2]);
+});
+
+test("environmentFilterOptions returns unique sorted exact options", () => {
+  assert.deepEqual(environmentFilterOptions(FILTER_ENVIRONMENTS), {
+    projects: ["claims", "customer-service"],
+    runtimePlans: ["runtime-balanced", "runtime-high-memory"],
+    statuses: ["Degraded", "Running"],
+  });
+});
+
+test("validateWizardStep marks each four-step required field", () => {
+  assert.deepEqual(
+    Object.keys(
+      validateWizardStep(
+        {
+          ...DEFAULT_WIZARD_INPUT,
+          name: " ",
+          project: "",
+          owner: "",
+        },
+        1,
+      ),
+    ),
+    ["name", "project", "owner"],
+  );
+  assert.deepEqual(
+    Object.keys(
+      validateWizardStep(
+        {
+          ...DEFAULT_WIZARD_INPUT,
+          image: "",
+          containerPort: 0,
+          runtimePlanId: "",
+          desiredInstances: 0,
+        },
+        2,
+      ),
+    ),
+    ["image", "containerPort", "runtimePlanId", "desiredInstances"],
+  );
+  assert.deepEqual(
+    Object.keys(
+      validateWizardStep(
+        {
+          ...DEFAULT_WIZARD_INPUT,
+          ingressProfileId: "",
+          egressProfileId: "",
+          securityBaseline: false,
+        },
+        3,
+      ),
+    ),
+    ["ingressProfileId", "egressProfileId", "securityBaseline"],
+  );
+  assert.deepEqual(
+    Object.keys(
+      validateWizardStep(
+        {
+          ...DEFAULT_WIZARD_INPUT,
+          endpointVisibility: "",
+          sessionHeader: "",
+        },
+        4,
+      ),
+    ),
+    ["endpointVisibility", "sessionHeader"],
+  );
+});
+
+test("validateWizardStep accepts the complete provided wizard defaults", () => {
+  for (const step of [1, 2, 3, 4] as const) {
+    assert.deepEqual(validateWizardStep(DEFAULT_WIZARD_INPUT, step), {});
+  }
+});
+
+test("deployment progress uses the eight approved business labels in order", () => {
+  assert.deepEqual(DEPLOYMENT_STAGE_COPY, [
+    "配置已接受",
+    "镜像 Digest 已固化",
+    "身份与网络策略已生效",
+    "SecureTaskProfile 已校验",
+    "实例已启动",
+    "健康检查通过",
+    "LB 后端已注册",
+    "HTTPS Endpoint Ready",
+  ]);
+});
+
+test("overview metrics derive live counts and investment outcomes are marked as mock", async () => {
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const metrics = deriveOverviewMetrics(state);
+
+  assert.equal(metrics.environmentCount, state.environments.length);
+  assert.equal(
+    metrics.readyInstanceCount,
+    state.instances.filter((instance) => instance.status === "Ready").length,
+  );
+  assert.equal(
+    metrics.recentReleaseCount,
+    state.revisions.filter(
+      (revision) =>
+        revision.status === "Stable" ||
+        revision.status === "Deploying",
+    ).length,
+  );
+  assert.equal(metrics.governanceHealth, "需关注");
+  assert.deepEqual(
+    INVESTMENT_OUTCOMES.map(({ copy, isMock }) => ({ copy, isMock })),
+    [
+      { copy: "镜像到 Endpoint 3 天 → 18 分钟", isMock: true },
+      { copy: "上线协作 6 个团队 → 1 个入口", isMock: true },
+      { copy: "人工步骤 23 → 5", isMock: true },
+    ],
+  );
 });
