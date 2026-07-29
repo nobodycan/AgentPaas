@@ -545,3 +545,84 @@ test("enumeratePendingTransitions returns only unfinished isolation steps", asyn
     false,
   );
 });
+
+test("parseRoute recognizes primary list and governance routes", async () => {
+  const { parseRoute } = await import("../lib/routes.ts");
+
+  assert.deepEqual(parseRoute("/overview"), { view: "overview" });
+  assert.deepEqual(parseRoute("/environments"), {
+    view: "environment-list",
+  });
+  assert.deepEqual(parseRoute("/environments/new"), {
+    view: "environment-create",
+  });
+  assert.deepEqual(parseRoute("/audit"), { view: "audit" });
+  assert.deepEqual(parseRoute("/security-events"), {
+    view: "security-events",
+  });
+  assert.deepEqual(parseRoute("/resource-pools"), {
+    view: "resource-pools",
+  });
+  assert.deepEqual(parseRoute("/profiles"), { view: "profiles" });
+});
+
+test("parseRoute recognizes every environment detail tab", async () => {
+  const { ENVIRONMENT_TABS, parseRoute } = await import("../lib/routes.ts");
+
+  assert.deepEqual(ENVIRONMENT_TABS, [
+    "overview",
+    "access",
+    "config",
+    "instances",
+    "revisions",
+    "observability",
+    "security",
+    "operations",
+  ]);
+
+  for (const tab of ENVIRONMENT_TABS) {
+    assert.deepEqual(parseRoute(`/environments/env-1/${tab}`), {
+      view: "environment-detail",
+      environmentId: "env-1",
+      tab,
+    });
+  }
+});
+
+test("parseRoute returns not-found for unknown paths and detail tabs", async () => {
+  const { parseRoute } = await import("../lib/routes.ts");
+
+  assert.deepEqual(parseRoute("/unknown"), { view: "not-found" });
+  assert.deepEqual(parseRoute("/environments/env-1/unknown"), {
+    view: "not-found",
+  });
+});
+
+test("the seven-step demo guide has stable product destinations", async () => {
+  const { DEMO_STEPS } = await import("../lib/routes.ts");
+
+  assert.deepEqual(
+    DEMO_STEPS.map((step) => step.destination),
+    [
+      "/overview",
+      "/environments",
+      "/environments/new",
+      "/environments/env-customer-service-prod/access",
+      "/environments/env-customer-service-prod/revisions",
+      "/security-events",
+      "/audit",
+    ],
+  );
+});
+
+test("getNextDemoStep advances, wraps, and resets unknown progress", async () => {
+  const { DEMO_STEPS, getNextDemoStep } = await import("../lib/routes.ts");
+
+  assert.deepEqual(getNextDemoStep(DEMO_STEPS[0].id), DEMO_STEPS[1]);
+  assert.deepEqual(
+    getNextDemoStep(DEMO_STEPS.at(-1)?.id),
+    DEMO_STEPS[0],
+  );
+  assert.deepEqual(getNextDemoStep(), DEMO_STEPS[0]);
+  assert.deepEqual(getNextDemoStep("not-a-step"), DEMO_STEPS[0]);
+});
