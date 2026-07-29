@@ -32,7 +32,10 @@ export type ProfileKind =
   | "RUNTIME"
   | "INGRESS"
   | "EGRESS"
-  | "SECURE_TASK";
+  | "SECURE_TASK"
+  | "IDENTITY"
+  | "LOGGING"
+  | "DOMAIN";
 
 export type ClusterStatus = "Healthy" | "Degraded" | "Unavailable";
 
@@ -50,6 +53,9 @@ export interface Environment {
   ingressProfileId: string;
   egressProfileId: string;
   secureTaskProfileId?: string;
+  identityProfileId?: string;
+  loggingProfileId?: string;
+  domainProfileId?: string;
 }
 
 export interface Revision {
@@ -83,6 +89,8 @@ export interface Profile {
 export interface Cluster {
   id: string;
   name: string;
+  tenantId: string;
+  dedicated: true;
   region: string;
   status: ClusterStatus;
   readyCapacity: number;
@@ -109,6 +117,46 @@ export interface SecurityIncident {
   detectedAt: string;
   resolvedAt?: string;
   auditEventIds: readonly string[];
+  context?: Readonly<Record<string, string>>;
+}
+
+export interface DemoState {
+  schemaVersion: 1;
+  generation: number;
+  environments: Environment[];
+  revisions: Revision[];
+  instances: Instance[];
+  profiles: Profile[];
+  clusters: Cluster[];
+  auditEvents: AuditEvent[];
+  securityIncidents: SecurityIncident[];
+  deploymentSteps: Record<string, number>;
+  isolationSteps: Record<string, number>;
+}
+
+export interface CreateEnvironmentInput {
+  name: string;
+  project: string;
+  owner: string;
+  desiredInstances: number;
+  runtimePlanId: string;
+  ingressProfileId: string;
+  egressProfileId: string;
+  secureTaskProfileId?: string;
+  identityProfileId?: string;
+  loggingProfileId?: string;
+  domainProfileId?: string;
+}
+
+export interface AccessResult {
+  allowed: boolean;
+  sessionKey: string;
+  environmentId: string;
+  instanceId?: string;
+  policyId: string;
+  destination: string;
+  auditEventId: string;
+  message: string;
 }
 
 export type DeploymentStage =
