@@ -52,6 +52,9 @@ export interface Environment {
   runtimePlanId: string;
   ingressProfileId: string;
   egressProfileId: string;
+  containerPort?: number;
+  endpointVisibility?: string;
+  sessionHeader?: string;
   secureTaskProfileId?: string;
   identityProfileId?: string;
   loggingProfileId?: string;
@@ -138,10 +141,14 @@ export interface CreateEnvironmentInput {
   name: string;
   project: string;
   owner: string;
+  image?: string;
+  containerPort?: number;
   desiredInstances: number;
   runtimePlanId: string;
   ingressProfileId: string;
   egressProfileId: string;
+  endpointVisibility?: string;
+  sessionHeader?: string;
   secureTaskProfileId?: string;
   identityProfileId?: string;
   loggingProfileId?: string;

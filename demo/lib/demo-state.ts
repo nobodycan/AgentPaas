@@ -146,6 +146,12 @@ function isEnvironment(value: unknown): boolean {
     isString(value.runtimePlanId) &&
     isString(value.ingressProfileId) &&
     isString(value.egressProfileId) &&
+    (value.containerPort === undefined ||
+      (isSafeInteger(value.containerPort) &&
+        value.containerPort >= 1 &&
+        value.containerPort <= 65_535)) &&
+    isOptionalString(value.endpointVisibility) &&
+    isOptionalString(value.sessionHeader) &&
     isOptionalString(value.secureTaskProfileId) &&
     isOptionalString(value.identityProfileId) &&
     isOptionalString(value.loggingProfileId) &&
@@ -365,6 +371,16 @@ export function createEnvironment(
     runtimePlanId: input.runtimePlanId,
     ingressProfileId: input.ingressProfileId,
     egressProfileId: input.egressProfileId,
+    containerPort:
+      Number.isInteger(input.containerPort) &&
+      (input.containerPort ?? 0) >= 1 &&
+      (input.containerPort ?? 0) <= 65_535
+        ? input.containerPort
+        : 8080,
+    endpointVisibility:
+      input.endpointVisibility?.trim() || "internal",
+    sessionHeader:
+      input.sessionHeader?.trim() || "X-Agent-Session-ID",
     secureTaskProfileId: input.secureTaskProfileId,
     identityProfileId: input.identityProfileId ?? "identity-workload",
     loggingProfileId: input.loggingProfileId ?? "logging-audit",
@@ -374,7 +390,9 @@ export function createEnvironment(
     id: revisionId,
     environmentId,
     sequence: revisionSequence,
-    image: `registry.demo.local/${slugify(input.project || input.name)}:draft-${revisionSequence}`,
+    image:
+      input.image?.trim() ||
+      `registry.demo.local/${slugify(input.project || input.name)}:draft-${revisionSequence}`,
     status: "Pending",
     createdAt,
     createdBy: environment.owner,

@@ -199,6 +199,39 @@ test("createEnvironment adds one Draft environment and one control-plane audit e
   assert.equal(initial.environments.length, 10);
 });
 
+test("createEnvironment persists the wizard image, port, endpoint visibility, and session header", async () => {
+  const { createEnvironment, createInitialDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const created = createEnvironment(createInitialDemoState(), {
+    name: "Procurement Assistant",
+    project: "supply-chain / production",
+    owner: "Wang Min",
+    image:
+      "registry.internal.example.com/agents/procurement-assistant:1.4.0",
+    containerPort: 8080,
+    desiredInstances: 2,
+    runtimePlanId: "balanced-2c4g",
+    ingressProfileId: "internal-sso-sse",
+    egressProfileId: "approved-model-and-tools",
+    endpointVisibility: "internal",
+    sessionHeader: "X-Agent-Session-ID",
+  });
+  const environment = created.environments.at(-1);
+  assert.ok(environment);
+  const revision = created.revisions.find(
+    (candidate) => candidate.id === environment.desiredRevisionId,
+  );
+
+  assert.equal(
+    revision?.image,
+    "registry.internal.example.com/agents/procurement-assistant:1.4.0",
+  );
+  assert.equal(environment.containerPort, 8080);
+  assert.equal(environment.endpointVisibility, "internal");
+  assert.equal(environment.sessionHeader, "X-Agent-Session-ID");
+});
+
 test("applyDeploymentStep exposes an endpoint and readies desired instances only at completion", async () => {
   const {
     applyDeploymentStep,
@@ -810,5 +843,88 @@ test("overview metrics derive live counts and investment outcomes are marked as 
       { copy: "上线协作 6 个团队 → 1 个入口", isMock: true },
       { copy: "人工步骤 23 → 5", isMock: true },
     ],
+  );
+});
+
+test("copyEndpoint reports Clipboard API success without using the legacy fallback", async () => {
+  const { copyEndpoint } = await import("../lib/clipboard.ts");
+  const writes: string[] = [];
+
+  const copied = await copyEndpoint("https://agent.example.test", {
+    clipboard: {
+      async writeText(value: string) {
+        writes.push(value);
+      },
+    },
+    document: null,
+  });
+
+  assert.equal(copied, true);
+  assert.deepEqual(writes, ["https://agent.example.test"]);
+});
+
+test("copyEndpoint falls back to a temporary textarea and reports the real execCommand result", async () => {
+  const { copyEndpoint } = await import("../lib/clipboard.ts");
+  const events: string[] = [];
+  const textarea = {
+    value: "",
+    style: {} as Record<string, string>,
+    setAttribute(name: string) {
+      events.push(`attribute:${name}`);
+    },
+    focus() {
+      events.push("focus");
+    },
+    select() {
+      events.push("select");
+    },
+  };
+  const document = {
+    body: {
+      appendChild() {
+        events.push("append");
+      },
+      removeChild() {
+        events.push("remove");
+      },
+    },
+    createElement(tagName: string) {
+      events.push(`create:${tagName}`);
+      return textarea;
+    },
+    execCommand(command: string) {
+      events.push(`command:${command}`);
+      return true;
+    },
+  };
+
+  const copied = await copyEndpoint("https://fallback.example.test", {
+    clipboard: {
+      async writeText() {
+        throw new Error("clipboard denied");
+      },
+    },
+    document,
+  });
+
+  assert.equal(copied, true);
+  assert.equal(textarea.value, "https://fallback.example.test");
+  assert.deepEqual(events, [
+    "create:textarea",
+    "attribute:readonly",
+    "append",
+    "focus",
+    "select",
+    "command:copy",
+    "remove",
+  ]);
+
+  document.execCommand = () => false;
+  assert.equal(
+    await copyEndpoint("https://fallback.example.test", {
+      clipboard: null,
+      document,
+    }),
+    false,
   );
 });
