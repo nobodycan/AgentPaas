@@ -16,7 +16,9 @@ import {
 import { EnvironmentDetailPanel } from "../features/environment-detail";
 import { OverviewPage } from "../features/overview";
 import { useDemo } from "../lib/demo-store";
+import { filterAuditEventsByCorrelation } from "../lib/runtime-view-models";
 import {
+  correlationFromSearch,
   isProductPath,
   parseRoute,
 } from "../lib/routes";
@@ -118,14 +120,43 @@ const AUDIT_COLUMNS: readonly DataTableColumn<AuditEvent>[] = [
     render: (event) => event.actor,
   },
   {
+    id: "correlation",
+    header: "关联标识",
+    render: (event) => (
+      <div className="table-primary">
+        <strong>{event.details.requestId ?? "—"}</strong>
+        <small>
+          Operation: {event.details.operationId ?? "—"}
+          <br />
+          Task: {event.details.taskId ?? "—"}
+        </small>
+      </div>
+    ),
+  },
+  {
     id: "time",
     header: "发生时间",
     render: (event) => event.occurredAt.replace("T", " ").slice(0, 19),
   },
 ];
 
-function AuditPanel(): React.ReactElement {
+function AuditPanel({
+  search,
+  onNavigate,
+}: {
+  search: string;
+  onNavigate(destination: string): void;
+}): React.ReactElement {
   const { auditEvents } = useDemo();
+  const correlation = correlationFromSearch(search);
+  const [draftCorrelation, setDraftCorrelation] = useState(correlation);
+  const rows = (
+    correlation
+      ? filterAuditEventsByCorrelation(auditEvents, correlation)
+      : auditEvents.slice(-8)
+  )
+    .slice()
+    .reverse();
 
   return (
     <section aria-labelledby="audit-title">
@@ -138,11 +169,51 @@ function AuditPanel(): React.ReactElement {
         审计中心
       </span>
       <section className="content-card">
+        <form
+          className="audit-correlation-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const nextCorrelation = draftCorrelation.trim();
+            onNavigate(
+              nextCorrelation
+                ? `/audit?correlation=${encodeURIComponent(nextCorrelation)}`
+                : "/audit",
+            );
+          }}
+        >
+          <label className="form-field">
+            <span>Request / Operation / Task ID</span>
+            <input
+              value={draftCorrelation}
+              onChange={(event) =>
+                setDraftCorrelation(event.target.value)
+              }
+              placeholder="输入完整关联标识"
+            />
+          </label>
+          <button type="submit" className="button button--primary">
+            精确检索
+          </button>
+          <button
+            type="button"
+            className="button button--quiet"
+            disabled={!correlation && !draftCorrelation}
+            onClick={() => onNavigate("/audit")}
+          >
+            清除
+          </button>
+        </form>
+        <p className="filter-result-count" role="status" aria-live="polite">
+          {correlation
+            ? `关联标识 ${correlation}：${rows.length} 条精确匹配`
+            : "显示最近 8 条审计事件"}
+        </p>
         <DataTable
-          caption="最近审计事件"
+          caption={correlation ? "关联审计事件" : "最近审计事件"}
           columns={AUDIT_COLUMNS}
-          rows={auditEvents.slice(-8).reverse()}
+          rows={rows}
           getRowKey={(event) => event.id}
+          emptyMessage="没有与该 Request、Operation 或 Task ID 精确匹配的审计事件。"
         />
       </section>
     </section>
@@ -350,9 +421,11 @@ function NotFoundPanel(): React.ReactElement {
 
 function RoutePanel({
   route,
+  search,
   onNavigate,
 }: {
   route: AppRoute;
+  search: string;
   onNavigate(destination: string): void;
 }): React.ReactElement {
   switch (route.view) {
@@ -371,7 +444,13 @@ function RoutePanel({
         />
       );
     case "audit":
-      return <AuditPanel />;
+      return (
+        <AuditPanel
+          key={search}
+          search={search}
+          onNavigate={onNavigate}
+        />
+      );
     case "security-events":
       return <SecurityEventsPanel />;
     case "resource-pools":
@@ -388,19 +467,30 @@ export function AgentPaaSDemo({
 }: {
   initialPath: string;
 }): React.ReactElement {
-  const [pathname, setPathname] = useState(initialPath);
-  const canonicalPathname = pathname === "/" ? "/overview" : pathname;
+  const [clientLocation, setClientLocation] = useState(initialPath);
+  const parsedLocation = useMemo(
+    () => new URL(clientLocation, "https://demo.agentpaas.local"),
+    [clientLocation],
+  );
+  const canonicalPathname =
+    parsedLocation.pathname === "/"
+      ? "/overview"
+      : parsedLocation.pathname;
   const route = useMemo(
     () => parseRoute(canonicalPathname),
     [canonicalPathname],
   );
 
   useEffect(() => {
-    const handlePopState = () => {
-      setPathname(window.location.pathname);
+    const syncClientLocation = () => {
+      setClientLocation(
+        `${window.location.pathname}${window.location.search}${window.location.hash}`,
+      );
     };
-    window.addEventListener("popstate", handlePopState);
-    return () => window.removeEventListener("popstate", handlePopState);
+    syncClientLocation();
+    window.addEventListener("popstate", syncClientLocation);
+    return () =>
+      window.removeEventListener("popstate", syncClientLocation);
   }, []);
 
   const navigate = useCallback((destination: string) => {
@@ -417,7 +507,7 @@ export function AgentPaaSDemo({
     if (nextLocation !== currentLocation) {
       window.history.pushState({}, "", nextLocation);
     }
-    setPathname(url.pathname);
+    setClientLocation(nextLocation);
   }, []);
 
   const handleLinkClick = useCallback(
@@ -477,7 +567,11 @@ export function AgentPaaSDemo({
         跳到主要内容
       </a>
       <AppShell pathname={canonicalPathname} onNavigate={navigate}>
-        <RoutePanel route={route} onNavigate={navigate} />
+        <RoutePanel
+          route={route}
+          search={parsedLocation.search}
+          onNavigate={navigate}
+        />
       </AppShell>
     </div>
   );

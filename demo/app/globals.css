@@ -1511,6 +1511,21 @@ a {
   font-size: 0.7rem;
 }
 
+.audit-correlation-form {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) auto auto;
+  align-items: end;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+
+.security-profile-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
 .access-request-grid {
   display: grid;
   grid-template-columns: 8rem minmax(14rem, 1.4fr) repeat(2, minmax(10rem, 1fr));
@@ -1726,6 +1741,10 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .audit-correlation-form {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
   .observability-grid,
   .evidence-grid,
   .evidence-grid--overview {
@@ -1832,6 +1851,10 @@ a {
   .evidence-grid,
   .evidence-grid--overview,
   .security-profile-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .audit-correlation-form {
     grid-template-columns: minmax(0, 1fr);
   }
 

@@ -2,6 +2,8 @@ import { resolveImageDigest } from "./view-models.ts";
 import type {
   AccessRequestSnapshot,
   AccessResult,
+  AuditEvent,
+  Environment,
   Revision,
 } from "./types.ts";
 
@@ -20,10 +22,180 @@ export function createAccessRequestSnapshot(
     method,
     path: input.path.trim() || "/",
     body: method === "GET" ? "" : input.body,
-    sessionHeader:
-      input.sessionHeader.trim() || "X-Agent-Session-ID",
-    sessionValue: input.sessionValue.trim(),
+    sessionHeaderName:
+      input.sessionHeaderName.trim() || "X-Agent-Session-ID",
+    sessionKey: input.sessionKey.trim(),
   };
+}
+
+export interface AccessPolicyDecision {
+  allowed: boolean;
+  decision: "ALLOW" | "DENY";
+  reason: string;
+  policyId: string;
+}
+
+function deniedAccess(
+  reason: string,
+  policyId: string,
+): AccessPolicyDecision {
+  return {
+    allowed: false,
+    decision: "DENY",
+    reason,
+    policyId,
+  };
+}
+
+export function evaluateAccessRequest(
+  environment: Environment | undefined,
+  request: AccessRequestSnapshot,
+  hasReadyInstance: boolean,
+): AccessPolicyDecision {
+  if (!environment) {
+    return deniedAccess("运行环境不存在", "unconfigured-ingress");
+  }
+
+  const policyId =
+    environment.ingressProfileId.trim() || "unconfigured-ingress";
+  if (environment.status !== "Running") {
+    return deniedAccess("环境状态不是 Running", policyId);
+  }
+  if (!environment.ingressProfileId.trim()) {
+    return deniedAccess("未绑定 IngressProfile", policyId);
+  }
+  if (request.method !== "POST") {
+    return deniedAccess("入口仅支持 POST", policyId);
+  }
+  if (request.path !== "/v1/chat/completions") {
+    return deniedAccess(
+      "路径必须为 /v1/chat/completions",
+      policyId,
+    );
+  }
+  if (
+    !environment.sessionHeader ||
+    request.sessionHeaderName !== environment.sessionHeader
+  ) {
+    return deniedAccess(
+      `Session Header 必须为 ${
+        environment.sessionHeader ?? "环境已配置的名称"
+      }`,
+      policyId,
+    );
+  }
+  if (!request.body.trim()) {
+    return deniedAccess("请求 Body 不能为空", policyId);
+  }
+  try {
+    JSON.parse(request.body);
+  } catch {
+    return deniedAccess("请求 Body 必须是有效 JSON", policyId);
+  }
+  if (!hasReadyInstance) {
+    return deniedAccess("当前没有 Ready 实例", policyId);
+  }
+
+  return {
+    allowed: true,
+    decision: "ALLOW",
+    reason: "入口策略模拟判定通过",
+    policyId,
+  };
+}
+
+export function filterAuditEventsByCorrelation(
+  events: readonly AuditEvent[],
+  correlation: string,
+): AuditEvent[] {
+  const expected = correlation.trim();
+  if (!expected) {
+    return [];
+  }
+
+  return events.filter((event) =>
+    [
+      event.details.requestId,
+      event.details.operationId,
+      event.details.taskId,
+    ].some((value) => value === expected),
+  );
+}
+
+export function runtimePanelKey(
+  panel: "access" | "revisions",
+  environmentId: string,
+  generation: number,
+): string {
+  return `${panel}:${environmentId}:generation-${generation}`;
+}
+
+export interface SecurityProfileEvidence {
+  kind: string;
+  profileId: string;
+  status: string;
+  active: boolean;
+}
+
+function requiredProfileEvidence(
+  kind: string,
+  profileId: string | undefined,
+): SecurityProfileEvidence {
+  const active = Boolean(profileId);
+  return {
+    kind,
+    profileId: profileId ?? "未绑定",
+    status: active ? "已绑定" : "未绑定",
+    active,
+  };
+}
+
+function optionalProfileEvidence(
+  kind: string,
+  profileId: string | undefined,
+): SecurityProfileEvidence {
+  const active = Boolean(profileId);
+  return {
+    kind,
+    profileId: profileId ?? "未绑定",
+    status: active ? "可选 · 已绑定" : "可选 · 未绑定",
+    active,
+  };
+}
+
+export function securityProfileEvidence(
+  environment: Environment,
+): SecurityProfileEvidence[] {
+  return [
+    requiredProfileEvidence(
+      "RuntimeBaseline",
+      environment.runtimePlanId,
+    ),
+    requiredProfileEvidence(
+      "IngressProfile",
+      environment.ingressProfileId,
+    ),
+    requiredProfileEvidence(
+      "EgressProfile",
+      environment.egressProfileId,
+    ),
+    optionalProfileEvidence(
+      "SecureTaskProfile",
+      environment.secureTaskProfileId,
+    ),
+    requiredProfileEvidence(
+      "IdentityProfile",
+      environment.identityProfileId,
+    ),
+    requiredProfileEvidence(
+      "LoggingProfile",
+      environment.loggingProfileId,
+    ),
+    optionalProfileEvidence(
+      "DomainProfile",
+      environment.domainProfileId,
+    ),
+  ];
 }
 
 export interface AccessResponsePlan {
@@ -36,9 +208,7 @@ export function createAccessResponsePlan(
 ): AccessResponsePlan {
   return {
     contentType: "text/event-stream",
-    tokens: access.allowed
-      ? ACCESS_RESPONSE_TOKENS
-      : ["请求被拒绝：当前没有可用的 Ready 实例。"],
+    tokens: access.allowed ? ACCESS_RESPONSE_TOKENS : [],
   };
 }
 

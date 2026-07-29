@@ -164,12 +164,14 @@ export interface AccessRequestSnapshot {
   method: string;
   path: string;
   body: string;
-  sessionHeader: string;
-  sessionValue: string;
+  sessionHeaderName: string;
+  sessionKey: string;
 }
 
 export interface AccessResult {
   allowed: boolean;
+  decision: "ALLOW" | "DENY";
+  reason: string;
   sessionKey: string;
   environmentId: string;
   instanceId?: string;

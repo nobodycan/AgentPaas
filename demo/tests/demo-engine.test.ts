@@ -78,10 +78,12 @@ test("selectInstance rejects routing when no instance is ready", () => {
 test("access response plan is deterministic and contains non-empty Chinese SSE tokens", () => {
   const access = {
     allowed: true,
+    decision: "ALLOW" as const,
+    reason: "入口策略模拟判定通过",
     sessionKey: "demo-user-1024",
     environmentId: "env-production",
     instanceId: "ins-a",
-    policyId: "egress-restricted",
+    policyId: "ingress-private",
     destination: "/v1/chat",
     auditEventId: "audit-access-test-001",
     requestId: "req-demo-access-001",
@@ -89,8 +91,8 @@ test("access response plan is deterministic and contains non-empty Chinese SSE t
       method: "POST",
       path: "/v1/chat",
       body: '{"message":"hello"}',
-      sessionHeader: "X-Agent-Session-ID",
-      sessionValue: "demo-user-1024",
+      sessionHeaderName: "X-Agent-Session-ID",
+      sessionKey: "demo-user-1024",
     }),
     message: "Access routed to ins-a",
   };
@@ -110,17 +112,319 @@ test("access request snapshot records the submitted method, body, path, and sess
     method: "post",
     path: " /v1/chat/completions ",
     body: '{"message":"hello"}',
-    sessionHeader: " X-Agent-Session-ID ",
-    sessionValue: "demo-user-1024",
+    sessionHeaderName: " X-Agent-Session-ID ",
+    sessionKey: "demo-user-1024",
   });
 
   assert.deepEqual(submitted, {
     method: "POST",
     path: "/v1/chat/completions",
     body: '{"message":"hello"}',
-    sessionHeader: "X-Agent-Session-ID",
-    sessionValue: "demo-user-1024",
+    sessionHeaderName: "X-Agent-Session-ID",
+    sessionKey: "demo-user-1024",
   });
+});
+
+test("correlationFromSearch decodes one exact correlation query value", async () => {
+  const routes = await import("../lib/routes.ts");
+  const correlationFromSearch = Reflect.get(
+    routes,
+    "correlationFromSearch",
+  );
+  assert.equal(typeof correlationFromSearch, "function");
+
+  assert.equal(
+    correlationFromSearch("?correlation=req-demo-access-001"),
+    "req-demo-access-001",
+  );
+  assert.equal(
+    correlationFromSearch(
+      "?other=1&correlation=op-demo%20access%20001#ignored",
+    ),
+    "op-demo access 001",
+  );
+  assert.equal(correlationFromSearch("?correlation=%20%20"), "");
+  assert.equal(correlationFromSearch(""), "");
+});
+
+test("audit correlation matches exact Request, Operation, or Task ID", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const filterAuditEventsByCorrelation = Reflect.get(
+    runtimeViewModels,
+    "filterAuditEventsByCorrelation",
+  );
+  assert.equal(typeof filterAuditEventsByCorrelation, "function");
+  const events = [
+    {
+      id: "audit-1",
+      kind: "ACCESS",
+      type: "ACCESS_TEST",
+      actor: "demo",
+      targetId: "env-1",
+      occurredAt: "2026-07-30T00:00:00.000Z",
+      summary: "first",
+      details: {
+        requestId: "req-1",
+        operationId: "op-1",
+        taskId: "task-1",
+      },
+    },
+    {
+      id: "audit-2",
+      kind: "RUNTIME",
+      type: "INSTANCE_REPLACE",
+      actor: "demo",
+      targetId: "env-1",
+      occurredAt: "2026-07-30T00:00:01.000Z",
+      summary: "second",
+      details: {
+        requestId: "req-10",
+        operationId: "op-10",
+        taskId: "task-10",
+      },
+    },
+  ];
+
+  assert.deepEqual(
+    filterAuditEventsByCorrelation(events, "req-1").map(
+      (event: { id: string }) => event.id,
+    ),
+    ["audit-1"],
+  );
+  assert.deepEqual(
+    filterAuditEventsByCorrelation(events, "op-10").map(
+      (event: { id: string }) => event.id,
+    ),
+    ["audit-2"],
+  );
+  assert.deepEqual(
+    filterAuditEventsByCorrelation(events, "task-1").map(
+      (event: { id: string }) => event.id,
+    ),
+    ["audit-1"],
+  );
+  assert.deepEqual(filterAuditEventsByCorrelation(events, "req"), []);
+});
+
+test("evaluateAccessRequest allows only the configured inbound Agent endpoint", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const evaluateAccessRequest = Reflect.get(
+    runtimeViewModels,
+    "evaluateAccessRequest",
+  );
+  assert.equal(typeof evaluateAccessRequest, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const environment = state.environments.find(
+    (candidate) => candidate.id === "env-customer-service-prod",
+  );
+  assert.ok(environment);
+  const configuredEnvironment = {
+    ...environment,
+    sessionHeader: "X-Agent-Session-ID",
+  };
+  const request = createAccessRequestSnapshot({
+    method: "POST",
+    path: "/v1/chat/completions",
+    body: '{"message":"hello"}',
+    sessionHeaderName: "X-Agent-Session-ID",
+    sessionKey: "demo-user-1024",
+  });
+
+  assert.deepEqual(
+    evaluateAccessRequest(configuredEnvironment, request, true),
+    {
+      allowed: true,
+      decision: "ALLOW",
+      reason: "入口策略模拟判定通过",
+      policyId: configuredEnvironment.ingressProfileId,
+    },
+  );
+});
+
+test("evaluateAccessRequest denies every unsupported or unsafe inbound request", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const evaluateAccessRequest = Reflect.get(
+    runtimeViewModels,
+    "evaluateAccessRequest",
+  );
+  assert.equal(typeof evaluateAccessRequest, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const environment = state.environments.find(
+    (candidate) => candidate.id === "env-customer-service-prod",
+  );
+  assert.ok(environment);
+  const configuredEnvironment = {
+    ...environment,
+    sessionHeader: "X-Agent-Session-ID",
+  };
+  const request = createAccessRequestSnapshot({
+    method: "POST",
+    path: "/v1/chat/completions",
+    body: '{"message":"hello"}',
+    sessionHeaderName: "X-Agent-Session-ID",
+    sessionKey: "demo-user-1024",
+  });
+  const denials = [
+    {
+      environment: undefined,
+      request,
+      hasReady: true,
+      reason: /不存在/u,
+    },
+    {
+      environment: { ...configuredEnvironment, status: "Stopped" },
+      request,
+      hasReady: true,
+      reason: /Running/u,
+    },
+    {
+      environment: { ...configuredEnvironment, ingressProfileId: "" },
+      request,
+      hasReady: true,
+      reason: /IngressProfile/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request: { ...request, method: "GET" },
+      hasReady: true,
+      reason: /POST/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request: { ...request, path: "/health" },
+      hasReady: true,
+      reason: /\/v1\/chat\/completions/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request: {
+        ...request,
+        sessionHeaderName: "X-Wrong-Session",
+      },
+      hasReady: true,
+      reason: /Session Header/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request: { ...request, body: " " },
+      hasReady: true,
+      reason: /不能为空/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request: { ...request, body: "not-json" },
+      hasReady: true,
+      reason: /有效 JSON/u,
+    },
+    {
+      environment: configuredEnvironment,
+      request,
+      hasReady: false,
+      reason: /Ready/u,
+    },
+  ];
+
+  for (const denial of denials) {
+    const result = evaluateAccessRequest(
+      denial.environment,
+      denial.request,
+      denial.hasReady,
+    );
+    assert.equal(result.allowed, false);
+    assert.equal(result.decision, "DENY");
+    assert.match(result.reason, denial.reason);
+  }
+});
+
+test("denied access does not expose SSE success tokens", () => {
+  const denied = createAccessResponsePlan({
+    allowed: false,
+    decision: "DENY",
+    reason: "入口仅支持 POST",
+    sessionKey: "demo-user-1024",
+    environmentId: "env-production",
+    policyId: "ingress-private",
+    destination: "/v1/chat/completions",
+    auditEventId: "audit-access-test-001",
+    requestId: "req-demo-access-001",
+    request: createAccessRequestSnapshot({
+      method: "GET",
+      path: "/v1/chat/completions",
+      body: "",
+      sessionHeaderName: "X-Agent-Session-ID",
+      sessionKey: "demo-user-1024",
+    }),
+    message: "Denied",
+  });
+
+  assert.deepEqual(denied.tokens, []);
+});
+
+test("runtimePanelKey scopes local state by panel, environment, and generation", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const runtimePanelKey = Reflect.get(
+    runtimeViewModels,
+    "runtimePanelKey",
+  );
+  assert.equal(typeof runtimePanelKey, "function");
+
+  assert.equal(
+    runtimePanelKey("access", "env-a", 1),
+    "access:env-a:generation-1",
+  );
+  assert.notEqual(
+    runtimePanelKey("access", "env-a", 1),
+    runtimePanelKey("access", "env-b", 1),
+  );
+  assert.notEqual(
+    runtimePanelKey("revisions", "env-a", 1),
+    runtimePanelKey("revisions", "env-a", 2),
+  );
+});
+
+test("securityProfileEvidence keeps optional SecureTask unbound without failing active baseline rows", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const securityProfileEvidence = Reflect.get(
+    runtimeViewModels,
+    "securityProfileEvidence",
+  );
+  assert.equal(typeof securityProfileEvidence, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const environment = state.environments.find(
+    (candidate) => candidate.id === "env-knowledge-prod",
+  );
+  assert.ok(environment);
+
+  const rows = securityProfileEvidence(environment);
+  const secureTask = rows.find(
+    (row: { kind: string }) => row.kind === "SecureTaskProfile",
+  );
+  const ingress = rows.find(
+    (row: { kind: string }) => row.kind === "IngressProfile",
+  );
+
+  assert.deepEqual(secureTask, {
+    kind: "SecureTaskProfile",
+    profileId: "未绑定",
+    status: "可选 · 未绑定",
+    active: false,
+  });
+  assert.equal(ingress?.profileId, environment.ingressProfileId);
+  assert.equal(ingress?.status, "已绑定");
+  assert.equal(ingress?.active, true);
 });
 
 test("access stream cancel keeps emitted text and rejects late or stale tokens", () => {

@@ -11,6 +11,10 @@ import {
 import { useDemo } from "../lib/demo-store";
 import { ENVIRONMENT_TABS } from "../lib/routes";
 import type { EnvironmentTab } from "../lib/routes";
+import {
+  runtimePanelKey,
+  securityProfileEvidence,
+} from "../lib/runtime-view-models";
 import { resolveImageDigest } from "../lib/view-models";
 import type {
   Environment,
@@ -567,14 +571,7 @@ function SecurityPanel({
 }: {
   environment: Environment;
 }): React.ReactElement {
-  const profileRows = [
-    ["IngressProfile", environment.ingressProfileId],
-    ["EgressProfile", environment.egressProfileId],
-    ["SecureTaskProfile", environment.secureTaskProfileId ?? "未启用"],
-    ["IdentityProfile", environment.identityProfileId ?? "未配置"],
-    ["LoggingProfile", environment.loggingProfileId ?? "未配置"],
-    ["DomainProfile", environment.domainProfileId ?? "未配置"],
-  ];
+  const profileRows = securityProfileEvidence(environment);
 
   return (
     <section className="content-card">
@@ -583,17 +580,30 @@ function SecurityPanel({
           <p className="eyebrow">安全基线摘要</p>
           <h2>默认拒绝、工作负载身份与审计</h2>
           <p>
-            当前环境使用 Profile 引用组合安全能力；本页不显示凭据或
-            Secret 值。
+            每项状态均由当前 Profile 引用独立派生；SecureTask 与
+            Domain 为可选绑定，未绑定不会改变其他基线项的状态。
           </p>
         </div>
-        <StatusBadge tone="success">基线已应用</StatusBadge>
+        <StatusBadge tone="info">逐项证据</StatusBadge>
       </div>
       <dl className="security-profile-grid">
-        {profileRows.map(([label, value]) => (
-          <div key={label}>
-            <dt>{label}</dt>
-            <dd>{value}</dd>
+        {profileRows.map((row) => (
+          <div key={row.kind}>
+            <dt>{row.kind}</dt>
+            <dd className="security-profile-value">
+              <span>{row.profileId}</span>
+              <StatusBadge
+                tone={
+                  row.active
+                    ? "success"
+                    : row.status.startsWith("可选")
+                      ? "neutral"
+                      : "warning"
+                }
+              >
+                {row.status}
+              </StatusBadge>
+            </dd>
           </div>
         ))}
       </dl>
@@ -693,7 +703,10 @@ export function EnvironmentDetailPanel({
   tab: EnvironmentTab;
   onNavigate(destination: string): void;
 }): React.ReactElement {
-  const { environments } = useDemo();
+  const {
+    environments,
+    generation,
+  } = useDemo();
   const environment = environments.find(
     (candidate) => candidate.id === environmentId,
   );
@@ -736,7 +749,14 @@ export function EnvironmentDetailPanel({
         />
       ) : null}
       {tab === "access" ? (
-        <AccessTestPanel environmentId={environment.id} />
+        <AccessTestPanel
+          key={runtimePanelKey(
+            "access",
+            environment.id,
+            generation,
+          )}
+          environmentId={environment.id}
+        />
       ) : null}
       {tab === "config" ? (
         <ConfigurationPanel environment={environment} />
@@ -745,7 +765,14 @@ export function EnvironmentDetailPanel({
         <InstancesPanel environment={environment} />
       ) : null}
       {tab === "revisions" ? (
-        <RevisionsPanel environmentId={environment.id} />
+        <RevisionsPanel
+          key={runtimePanelKey(
+            "revisions",
+            environment.id,
+            generation,
+          )}
+          environmentId={environment.id}
+        />
       ) : null}
       {tab === "observability" ? (
         <ObservabilityPanel environment={environment} />

@@ -109,8 +109,10 @@ export function AccessTestPanel({
   const selectedRevision = selectedInstance
     ? revisions.find((revision) => revision.id === selectedInstance.revisionId)
     : undefined;
+  const affinitySessionKey = lastResult?.sessionKey ?? sessionValue;
   const latestSameSession = history.filter(
-    (result) => result.sessionKey === sessionValue && result.allowed,
+    (result) =>
+      result.sessionKey === affinitySessionKey && result.allowed,
   );
   const repeatedAffinity =
     latestSameSession.length >= 2
@@ -133,17 +135,16 @@ export function AccessTestPanel({
       method,
       path,
       body,
-      sessionHeader,
-      sessionValue,
+      sessionHeaderName: sessionHeader,
+      sessionKey: sessionValue,
     });
     const result = runAccessTest(
       environmentId,
-      submittedRequest.sessionValue,
+      submittedRequest.sessionKey,
       submittedRequest.path,
       submittedRequest,
     );
     setLastResult(result);
-    setHistory((current) => [...current.slice(-3), result]);
     streamOrdinalRef.current += 1;
     const streamId = `access-stream-${streamOrdinalRef.current}`;
     dispatch({
@@ -153,6 +154,11 @@ export function AccessTestPanel({
     });
 
     const responsePlan = createAccessResponsePlan(result);
+    if (!result.allowed) {
+      dispatch({ type: "complete", streamId });
+      return;
+    }
+    setHistory((current) => [...current.slice(-3), result]);
     responsePlan.tokens.forEach((token, index) => {
       const timer = setTimeout(() => {
         timersRef.current.delete(timer);
@@ -176,7 +182,9 @@ export function AccessTestPanel({
   };
 
   const liveStatus =
-    stream.status === "streaming"
+    lastResult && !lastResult.allowed
+      ? `入口策略模拟判定拒绝：${lastResult.reason}；未启动 SSE`
+      : stream.status === "streaming"
       ? "SSE 响应正在逐 Token 返回"
       : stream.status === "cancelled"
         ? "请求已取消；已返回内容和 Request ID 均已保留"
@@ -189,16 +197,19 @@ export function AccessTestPanel({
       <section className="content-card">
         <div className="content-card__header runtime-card-heading">
           <div>
-            <p className="eyebrow">真实路由演示</p>
-            <h2>访问测试与 SSE 响应</h2>
+            <p className="eyebrow">入口策略模拟判定</p>
+            <h2>访问测试与允许后的 SSE 响应</h2>
             <p>
-              会话头只用于 Ready 实例的尽力亲和；平台不会创建或持久化
-              Session 资源。
+              本地规则模拟 IngressProfile 判定；仅在 ALLOW 后使用会话头
+              对 Ready 实例做尽力亲和。平台不会创建或持久化 Session
+              资源。
             </p>
           </div>
           <StatusBadge
             tone={
-              stream.status === "completed"
+              lastResult && !lastResult.allowed
+                ? "danger"
+                : stream.status === "completed"
                 ? "success"
                 : stream.status === "cancelled"
                   ? "warning"
@@ -207,7 +218,11 @@ export function AccessTestPanel({
                     : "neutral"
             }
           >
-            {stream.status === "idle" ? "Idle" : stream.status}
+            {lastResult && !lastResult.allowed
+              ? "DENY"
+              : stream.status === "idle"
+                ? "Idle"
+                : stream.status}
           </StatusBadge>
         </div>
 
@@ -256,7 +271,7 @@ export function AccessTestPanel({
         <div className="runtime-actions">
           <span>
             {lastResult
-              ? `${lastResult.request.method} ${lastResult.request.path} · ${lastResult.request.sessionHeader}: ${lastResult.request.sessionValue}`
+              ? `${lastResult.request.method} ${lastResult.request.path} · ${lastResult.request.sessionHeaderName}: ${lastResult.request.sessionKey}`
               : `${method} ${path} · 尚未提交`}
           </span>
           <button
@@ -297,7 +312,10 @@ export function AccessTestPanel({
           aria-label="SSE 响应内容"
           aria-live="polite"
         >
-          {stream.output || "等待响应…"}
+          {stream.output ||
+            (lastResult && !lastResult.allowed
+              ? `未启动 SSE：${lastResult.reason}`
+              : "等待响应…")}
         </pre>
 
         {lastResult ? (
@@ -315,10 +333,11 @@ export function AccessTestPanel({
               <dd>{lastResult.instanceId ?? "无 Ready 实例"}</dd>
             </div>
             <div>
-              <dt>策略决策</dt>
+              <dt>入口策略模拟判定</dt>
               <dd>
-                {lastResult.allowed ? "ALLOW" : "DENY"} ·{" "}
-                {lastResult.policyId}
+                {lastResult.decision} · {lastResult.policyId}
+                <br />
+                {lastResult.reason}
               </dd>
             </div>
             <div>
@@ -330,8 +349,8 @@ export function AccessTestPanel({
             <div>
               <dt>提交的会话头</dt>
               <dd>
-                {lastResult.request.sessionHeader}:{" "}
-                {lastResult.request.sessionValue}
+                {lastResult.request.sessionHeaderName}:{" "}
+                {lastResult.request.sessionKey}
               </dd>
             </div>
             <div>

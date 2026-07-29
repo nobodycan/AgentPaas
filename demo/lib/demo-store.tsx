@@ -25,7 +25,10 @@ import type {
   PendingIsolationTransition,
 } from "./demo-state.ts";
 import { selectInstance } from "./demo-engine.ts";
-import { createAccessRequestSnapshot } from "./runtime-view-models.ts";
+import {
+  createAccessRequestSnapshot,
+  evaluateAccessRequest,
+} from "./runtime-view-models.ts";
 import {
   OPEN_INCIDENT_ID,
   PRIMARY_ENVIRONMENT_ID,
@@ -302,21 +305,23 @@ export function DemoProvider({
           method: "POST",
           path: destination,
           body: "",
-          sessionHeader:
+          sessionHeaderName:
             environment?.sessionHeader ?? "X-Agent-Session-ID",
-          sessionValue: sessionKey,
+          sessionKey,
         });
+      const policyDecision = evaluateAccessRequest(
+        environment,
+        submittedRequest,
+        environmentInstances.some(
+          (instance) => instance.status === "Ready",
+        ),
+      );
       let instanceId: string | undefined;
-      let allowed = false;
-
-      try {
+      if (policyDecision.allowed) {
         instanceId = selectInstance(
-          submittedRequest.sessionValue,
+          submittedRequest.sessionKey,
           environmentInstances,
         ).id;
-        allowed = Boolean(environment);
-      } catch {
-        allowed = false;
       }
 
       const accessOrdinal =
@@ -331,24 +336,26 @@ export function DemoProvider({
         "0",
       )}`;
       const result: AccessResult = {
-        allowed,
-        sessionKey: submittedRequest.sessionValue,
+        allowed: policyDecision.allowed,
+        decision: policyDecision.decision,
+        reason: policyDecision.reason,
+        sessionKey: submittedRequest.sessionKey,
         environmentId,
         instanceId,
-        policyId: environment?.egressProfileId ?? "egress-restricted",
+        policyId: policyDecision.policyId,
         destination: submittedRequest.path,
         auditEventId,
         requestId,
         request: submittedRequest,
-        message: allowed
+        message: policyDecision.allowed
           ? `Access routed to ${instanceId}`
-          : "Access denied because no ready instance is available",
+          : `Access denied: ${policyDecision.reason}`,
       };
       const auditEvent: AuditEvent = {
         id: auditEventId,
         kind: "ACCESS",
         type: "ACCESS_TEST",
-        actor: submittedRequest.sessionValue,
+        actor: submittedRequest.sessionKey,
         targetId: instanceId ?? environmentId,
         occurredAt: providerTimestamp(current.auditEvents.length),
         summary: result.message,
@@ -366,9 +373,10 @@ export function DemoProvider({
           method: submittedRequest.method,
           path: submittedRequest.path,
           body: submittedRequest.body,
-          sessionHeader: submittedRequest.sessionHeader,
-          sessionValue: submittedRequest.sessionValue,
-          decision: allowed ? "ALLOW" : "DENY",
+          sessionHeaderName: submittedRequest.sessionHeaderName,
+          sessionKey: submittedRequest.sessionKey,
+          decision: policyDecision.decision,
+          reason: policyDecision.reason,
         },
       };
 
@@ -381,14 +389,18 @@ export function DemoProvider({
             },
       );
 
-      const capturedGeneration = current.generation;
-      const timer = setTimeout(() => {
-        sseTimersRef.current.delete(timer);
-        if (!isCurrentGeneration(stateRef.current, capturedGeneration)) {
-          return;
-        }
-      }, 120);
-      sseTimersRef.current.add(timer);
+      if (policyDecision.allowed) {
+        const capturedGeneration = current.generation;
+        const timer = setTimeout(() => {
+          sseTimersRef.current.delete(timer);
+          if (
+            !isCurrentGeneration(stateRef.current, capturedGeneration)
+          ) {
+            return;
+          }
+        }, 120);
+        sseTimersRef.current.add(timer);
+      }
 
       return result;
     },

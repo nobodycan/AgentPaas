@@ -34,6 +34,15 @@ export interface DemoStep {
   actionLabel: string;
 }
 
+export function correlationFromSearch(search: string): string {
+  const query = search
+    .replace(/^\?/u, "")
+    .split("#", 1)[0];
+  return (
+    new URLSearchParams(query).get("correlation")?.trim() ?? ""
+  );
+}
+
 export const DEMO_STEPS = [
   {
     id: "platform-overview",
@@ -59,7 +68,7 @@ export const DEMO_STEPS = [
   {
     id: "test-access",
     title: "验证访问链路",
-    description: "检查入口、会话路由和出站策略的执行结果。",
+    description: "模拟入口策略判定，并验证允许后的会话亲和与 SSE。",
     destination: "/environments/env-customer-service-prod/access",
     actionLabel: "测试访问",
   },
