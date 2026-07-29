@@ -324,3 +324,224 @@ test("repeating a completed deployment transition does not duplicate audit event
   assert.equal(repeated.auditEvents.length, auditCount);
   assert.deepEqual(repeated, completed);
 });
+
+test("creating the same environment name twice keeps every instance ID unique", async () => {
+  const { createEnvironment, createInitialDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const input = {
+    name: "Repeated Demo",
+    project: "demo",
+    owner: "platform-demo",
+    desiredInstances: 2,
+    runtimePlanId: "runtime-balanced",
+    ingressProfileId: "ingress-private",
+    egressProfileId: "egress-restricted",
+  };
+  const first = createEnvironment(createInitialDemoState(), input);
+  const second = createEnvironment(first, input);
+  const instanceIds = second.instances.map((instance) => instance.id);
+
+  assert.equal(new Set(instanceIds).size, instanceIds.length);
+});
+
+test("rollbackEnvironment ignores unknown environments and environments without a failed revision", async () => {
+  const stateModule = await import("../lib/demo-state.ts");
+  const rollbackEnvironment = Reflect.get(
+    stateModule,
+    "rollbackEnvironment",
+  );
+  assert.equal(typeof rollbackEnvironment, "function");
+
+  const initial = stateModule.createInitialDemoState();
+  const unknownResult = rollbackEnvironment(initial, "env-does-not-exist");
+  const noFailedRevisionResult = rollbackEnvironment(
+    initial,
+    "env-payments-prod",
+  );
+
+  assert.deepEqual(unknownResult, initial);
+  assert.deepEqual(noFailedRevisionResult, initial);
+  assert.equal(unknownResult.auditEvents.length, initial.auditEvents.length);
+  assert.equal(
+    noFailedRevisionResult.auditEvents.length,
+    initial.auditEvents.length,
+  );
+});
+
+test("hydrateDemoState rejects malformed entities and transition records", async () => {
+  const { createInitialDemoState, hydrateDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const initial = createInitialDemoState();
+  const malformedStates = [
+    { ...initial, environments: [null] },
+    { ...initial, revisions: [{}] },
+    { ...initial, instances: [null] },
+    { ...initial, profiles: [{ ...initial.profiles[0], controls: null }] },
+    { ...initial, clusters: [{ ...initial.clusters[0], dedicated: false }] },
+    {
+      ...initial,
+      auditEvents: [{ ...initial.auditEvents[0], details: null }],
+    },
+    {
+      ...initial,
+      securityIncidents: [
+        { ...initial.securityIncidents[0], auditEventIds: [null] },
+      ],
+    },
+    { ...initial, deploymentSteps: { "env-broken": "three" } },
+    { ...initial, isolationSteps: { "sec-broken": null } },
+  ];
+
+  for (const malformed of malformedStates) {
+    assert.deepEqual(hydrateDemoState(malformed), initial);
+  }
+});
+
+test("createEnvironment clamps unsafe desired instance counts to 1 through 8", async () => {
+  const { createEnvironment, createInitialDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const expectedCounts = [
+    { requested: Number.NaN, expected: 1 },
+    { requested: Number.POSITIVE_INFINITY, expected: 8 },
+    { requested: Number.MAX_SAFE_INTEGER, expected: 8 },
+  ];
+
+  for (const { requested, expected } of expectedCounts) {
+    const created = createEnvironment(createInitialDemoState(), {
+      name: `Capacity ${String(requested)}`,
+      project: "demo",
+      owner: "platform-demo",
+      desiredInstances: requested,
+      runtimePlanId: "runtime-balanced",
+      ingressProfileId: "ingress-private",
+      egressProfileId: "egress-restricted",
+    });
+    const environment = created.environments.at(-1);
+    assert.equal(environment?.desiredInstances, expected);
+    assert.equal(
+      created.instances.filter(
+        (instance) => instance.environmentId === environment?.id,
+      ).length,
+      expected,
+    );
+  }
+});
+
+test("resolveDemoStateForRender defers persisted state until after mount", async () => {
+  const stateModule = await import("../lib/demo-state.ts");
+  const resolveDemoStateForRender = Reflect.get(
+    stateModule,
+    "resolveDemoStateForRender",
+  );
+  assert.equal(typeof resolveDemoStateForRender, "function");
+
+  const initial = stateModule.createInitialDemoState();
+  const persisted = stateModule.createEnvironment(initial, {
+    name: "Persisted Environment",
+    project: "demo",
+    owner: "platform-demo",
+    desiredInstances: 1,
+    runtimePlanId: "runtime-balanced",
+    ingressProfileId: "ingress-private",
+    egressProfileId: "egress-restricted",
+  });
+
+  assert.deepEqual(
+    resolveDemoStateForRender(JSON.stringify(persisted), false),
+    initial,
+  );
+  assert.deepEqual(
+    resolveDemoStateForRender(JSON.stringify(persisted), true),
+    stateModule.hydrateDemoState(JSON.stringify(persisted)),
+  );
+});
+
+test("enumeratePendingTransitions returns only unfinished deployment steps", async () => {
+  const stateModule = await import("../lib/demo-state.ts");
+  const enumeratePendingTransitions = Reflect.get(
+    stateModule,
+    "enumeratePendingTransitions",
+  );
+  assert.equal(typeof enumeratePendingTransitions, "function");
+
+  const created = stateModule.createEnvironment(
+    stateModule.createInitialDemoState(),
+    {
+      name: "Resumable Deploy",
+      project: "demo",
+      owner: "platform-demo",
+      desiredInstances: 2,
+      runtimePlanId: "runtime-balanced",
+      ingressProfileId: "ingress-private",
+      egressProfileId: "egress-restricted",
+    },
+  );
+  const environmentId = created.environments.at(-1)?.id;
+  assert.ok(environmentId);
+  const inProgress = stateModule.applyDeploymentStep(
+    created,
+    environmentId,
+    3,
+  );
+  const pending = enumeratePendingTransitions(inProgress);
+
+  assert.deepEqual(
+    pending.deployments
+      .filter(
+        (transition: { environmentId: string }) =>
+          transition.environmentId === environmentId,
+      )
+      .map((transition: { step: number }) => transition.step),
+    [4, 5, 6, 7],
+  );
+
+  const completed = stateModule.applyDeploymentStep(
+    inProgress,
+    environmentId,
+    7,
+  );
+  assert.equal(
+    enumeratePendingTransitions(completed).deployments.some(
+      (transition: { environmentId: string }) =>
+        transition.environmentId === environmentId,
+    ),
+    false,
+  );
+});
+
+test("enumeratePendingTransitions returns only unfinished isolation steps", async () => {
+  const { OPEN_INCIDENT_ID } = await import("../lib/mock-data.ts");
+  const stateModule = await import("../lib/demo-state.ts");
+  const enumeratePendingTransitions = Reflect.get(
+    stateModule,
+    "enumeratePendingTransitions",
+  );
+  const applyIsolationStep = Reflect.get(stateModule, "applyIsolationStep");
+  assert.equal(typeof enumeratePendingTransitions, "function");
+  assert.equal(typeof applyIsolationStep, "function");
+
+  const containing = stateModule.createInitialDemoState();
+  containing.securityIncidents[0].status = "Containing";
+  containing.isolationSteps[OPEN_INCIDENT_ID] = 2;
+  assert.deepEqual(
+    enumeratePendingTransitions(containing).isolations
+      .filter(
+        (transition: { incidentId: string }) =>
+          transition.incidentId === OPEN_INCIDENT_ID,
+      )
+      .map((transition: { step: number }) => transition.step),
+    [3, 4, 5],
+  );
+
+  const completed = applyIsolationStep(containing, OPEN_INCIDENT_ID, 5);
+  assert.equal(
+    enumeratePendingTransitions(completed).isolations.some(
+      (transition: { incidentId: string }) =>
+        transition.incidentId === OPEN_INCIDENT_ID,
+    ),
+    false,
+  );
+});

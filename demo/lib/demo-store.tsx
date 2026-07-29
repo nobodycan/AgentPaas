@@ -11,22 +11,22 @@ import React, {
 
 import {
   applyDeploymentStep,
+  applyIsolationStep,
   createEnvironment as createEnvironmentState,
-  createInitialDemoState,
-  hydrateDemoState,
+  enumeratePendingTransitions,
   isCurrentGeneration,
+  resolveDemoStateForRender,
   resetDemoState,
+  rollbackEnvironment,
 } from "./demo-state.ts";
+import type {
+  PendingDeploymentTransition,
+  PendingIsolationTransition,
+} from "./demo-state.ts";
+import { selectInstance } from "./demo-engine.ts";
 import {
-  isolationStateAt,
-  rollbackRevision,
-  selectInstance,
-} from "./demo-engine.ts";
-import {
-  FAILED_REVISION_ID,
   OPEN_INCIDENT_ID,
   PRIMARY_ENVIRONMENT_ID,
-  STABLE_REVISION_ID,
 } from "./mock-data.ts";
 import type {
   AccessResult,
@@ -72,18 +72,15 @@ function clearTimerSet(timerSet: TimerSet): void {
   timerSet.clear();
 }
 
-function loadPersistedState(): DemoState {
+function readPersistedState(): string | undefined {
   if (typeof window === "undefined") {
-    return createInitialDemoState();
+    return undefined;
   }
 
   try {
-    const storedState = window.localStorage.getItem(DEMO_STORAGE_KEY);
-    return storedState
-      ? hydrateDemoState(storedState)
-      : createInitialDemoState();
+    return window.localStorage.getItem(DEMO_STORAGE_KEY) ?? undefined;
   } catch {
-    return createInitialDemoState();
+    return undefined;
   }
 }
 
@@ -92,12 +89,15 @@ export function DemoProvider({
 }: {
   children: React.ReactNode;
 }): React.ReactElement {
-  const [state, setState] = useState<DemoState>(loadPersistedState);
+  const [state, setState] = useState<DemoState>(() =>
+    resolveDemoStateForRender(undefined, false),
+  );
   const stateRef = useRef(state);
   const deploymentTimersRef = useRef<TimerSet>(new Set());
   const sseTimersRef = useRef<TimerSet>(new Set());
   const rollbackTimersRef = useRef<TimerSet>(new Set());
   const isolationTimersRef = useRef<TimerSet>(new Set());
+  const hydrationPendingRef = useRef(true);
 
   const commit = useCallback(
     (update: (current: DemoState) => DemoState): DemoState => {
@@ -116,8 +116,108 @@ export function DemoProvider({
     clearTimerSet(isolationTimersRef.current);
   }, []);
 
+  const scheduleDeploymentTransitions = useCallback(
+    (
+      transitions: readonly PendingDeploymentTransition[],
+      capturedGeneration: number,
+    ) => {
+      transitions.forEach((transition, index) => {
+        const timer = setTimeout(
+          () => {
+            deploymentTimersRef.current.delete(timer);
+            if (
+              !isCurrentGeneration(
+                stateRef.current,
+                capturedGeneration,
+              )
+            ) {
+              return;
+            }
+            commit((current) =>
+              applyDeploymentStep(
+                current,
+                transition.environmentId,
+                transition.step,
+              ),
+            );
+          },
+          (index + 1) * 180,
+        );
+        deploymentTimersRef.current.add(timer);
+      });
+    },
+    [commit],
+  );
+
+  const scheduleIsolationTransitions = useCallback(
+    (
+      transitions: readonly PendingIsolationTransition[],
+      capturedGeneration: number,
+    ) => {
+      transitions.forEach((transition, index) => {
+        const timer = setTimeout(
+          () => {
+            isolationTimersRef.current.delete(timer);
+            if (
+              !isCurrentGeneration(
+                stateRef.current,
+                capturedGeneration,
+              )
+            ) {
+              return;
+            }
+            commit((current) =>
+              applyIsolationStep(
+                current,
+                transition.incidentId,
+                transition.step,
+              ),
+            );
+          },
+          (index + 1) * 180,
+        );
+        isolationTimersRef.current.add(timer);
+      });
+    },
+    [commit],
+  );
+
   useEffect(() => {
-    if (typeof window === "undefined") {
+    const persistedState = readPersistedState();
+    let cancelled = false;
+
+    queueMicrotask(() => {
+      if (cancelled) {
+        return;
+      }
+
+      const hydrated = resolveDemoStateForRender(persistedState, true);
+      hydrationPendingRef.current = false;
+      stateRef.current = hydrated;
+      setState(hydrated);
+
+      const pending = enumeratePendingTransitions(hydrated);
+      scheduleDeploymentTransitions(
+        pending.deployments,
+        hydrated.generation,
+      );
+      scheduleIsolationTransitions(
+        pending.isolations,
+        hydrated.generation,
+      );
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [scheduleDeploymentTransitions, scheduleIsolationTransitions]);
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      hydrationPendingRef.current ||
+      state !== stateRef.current
+    ) {
       return;
     }
 
@@ -163,31 +263,18 @@ export function DemoProvider({
         throw new Error("The demo environment could not be created.");
       }
 
-      const capturedGeneration = created.generation;
-      for (let step = 0; step <= 7; step += 1) {
-        const timer = setTimeout(
-          () => {
-            deploymentTimersRef.current.delete(timer);
-            if (
-              !isCurrentGeneration(
-                stateRef.current,
-                capturedGeneration,
-              )
-            ) {
-              return;
-            }
-            commit((current) =>
-              applyDeploymentStep(current, environmentId, step),
-            );
-          },
-          (step + 1) * 180,
+      const pendingDeployments =
+        enumeratePendingTransitions(created).deployments.filter(
+          (transition) => transition.environmentId === environmentId,
         );
-        deploymentTimersRef.current.add(timer);
-      }
+      scheduleDeploymentTransitions(
+        pendingDeployments,
+        created.generation,
+      );
 
       return environmentId;
     },
-    [commit],
+    [commit, scheduleDeploymentTransitions],
   );
 
   const runAccessTest = useCallback(
@@ -290,73 +377,7 @@ export function DemoProvider({
           return;
         }
 
-        commit((current) => {
-          const failedRevision =
-            current.revisions.find(
-              (revision) =>
-                revision.environmentId === environmentId &&
-                revision.status === "Failed",
-            ) ??
-            current.revisions.find(
-              (revision) => revision.id === FAILED_REVISION_ID,
-            );
-          const stableRevision =
-            current.revisions.find(
-              (revision) =>
-                revision.environmentId === environmentId &&
-                revision.status === "Stable",
-            ) ??
-            current.revisions.find(
-              (revision) => revision.id === STABLE_REVISION_ID,
-            );
-          if (!failedRevision || !stableRevision) {
-            return current;
-          }
-
-          const rollbackResult = rollbackRevision(
-            failedRevision.id,
-            stableRevision.id,
-          );
-          const auditId = `audit-rollback-${environmentId}-${failedRevision.id}`;
-          if (current.auditEvents.some((event) => event.id === auditId)) {
-            return current;
-          }
-
-          return {
-            ...current,
-            environments: current.environments.map((environment) =>
-              environment.id === environmentId
-                ? {
-                    ...environment,
-                    desiredRevisionId: rollbackResult.desiredRevisionId,
-                    status: "Running" as const,
-                  }
-                : environment,
-            ),
-            revisions: current.revisions.map((revision) =>
-              revision.id === failedRevision.id
-                ? { ...revision, status: "RolledBack" as const }
-                : revision.id === stableRevision.id
-                  ? { ...revision, status: "Stable" as const }
-                  : revision,
-            ),
-            auditEvents: [
-              ...current.auditEvents,
-              {
-                ...rollbackResult.operation,
-                id: auditId,
-                occurredAt: providerTimestamp(current.auditEvents.length),
-                details: {
-                  ...rollbackResult.operation.details,
-                  requestId: `req-demo-rollback-${environmentId}`,
-                  operationId: `op-demo-rollback-${environmentId}`,
-                  taskId: `task-demo-rollback-${environmentId}`,
-                  environmentId,
-                },
-              },
-            ],
-          };
-        });
+        commit((current) => rollbackEnvironment(current, environmentId));
       }, 240);
       rollbackTimersRef.current.add(timer);
     },
@@ -365,90 +386,15 @@ export function DemoProvider({
 
   const advanceIsolation = useCallback(
     (incidentId = OPEN_INCIDENT_ID, step?: number) => {
-      const capturedGeneration = stateRef.current.generation;
-      const timer = setTimeout(() => {
-        isolationTimersRef.current.delete(timer);
-        if (!isCurrentGeneration(stateRef.current, capturedGeneration)) {
-          return;
-        }
-
-        commit((current) => {
-          const incident = current.securityIncidents.find(
-            (candidate) => candidate.id === incidentId,
-          );
-          if (!incident) {
-            return current;
-          }
-
-          const nextStep =
-            step ?? (current.isolationSteps[incidentId] ?? -1) + 1;
-          const snapshot = isolationStateAt(nextStep);
-          const currentStep = current.isolationSteps[incidentId] ?? -1;
-          if (snapshot.step <= currentStep) {
-            return current;
-          }
-
-          const auditId = `audit-isolation-${incidentId}-${snapshot.step}`;
-          const auditExists = current.auditEvents.some(
-            (event) => event.id === auditId,
-          );
-
-          return {
-            ...current,
-            isolationSteps: {
-              ...current.isolationSteps,
-              [incidentId]: snapshot.step,
-            },
-            environments: current.environments.map((environment) =>
-              environment.id === incident.environmentId &&
-              snapshot.endpointState === "Isolated"
-                ? { ...environment, status: "Isolated" as const, endpoint: "" }
-                : environment,
-            ),
-            instances: current.instances.map((instance) =>
-              instance.environmentId === incident.environmentId &&
-              snapshot.endpointState === "Isolated"
-                ? { ...instance, status: "Isolated" as const }
-                : instance,
-            ),
-            securityIncidents: current.securityIncidents.map((candidate) =>
-              candidate.id === incidentId
-                ? {
-                    ...candidate,
-                    status: snapshot.modelIdentityRevoked
-                      ? ("Contained" as const)
-                      : ("Containing" as const),
-                  }
-                : candidate,
-            ),
-            auditEvents: auditExists
-              ? current.auditEvents
-              : [
-                  ...current.auditEvents,
-                  {
-                    id: auditId,
-                    kind: "SECURITY",
-                    type: "ISOLATION_ADVANCED",
-                    actor: "security-controller",
-                    targetId: incident.environmentId,
-                    occurredAt: providerTimestamp(current.auditEvents.length),
-                    summary: `Incident ${incidentId} entered ${snapshot.stage}`,
-                    details: {
-                      requestId: `req-demo-isolation-${incidentId}-${snapshot.step}`,
-                      operationId: `op-demo-isolation-${incidentId}-${snapshot.step}`,
-                      taskId: `task-demo-isolation-${incidentId}-${snapshot.step}`,
-                      incidentId,
-                      environmentId: incident.environmentId,
-                      stage: snapshot.stage,
-                    },
-                  },
-                ],
-          };
-        });
-      }, 180);
-      isolationTimersRef.current.add(timer);
+      const current = stateRef.current;
+      const nextStep =
+        step ?? (current.isolationSteps[incidentId] ?? -1) + 1;
+      scheduleIsolationTransitions(
+        [{ incidentId, step: nextStep }],
+        current.generation,
+      );
     },
-    [commit],
+    [scheduleIsolationTransitions],
   );
 
   const resetDemo = useCallback(() => {
