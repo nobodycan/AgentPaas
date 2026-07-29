@@ -894,20 +894,36 @@ export function hydrateDemoState(value: unknown): DemoState {
       return event;
     }
 
-    const rawSessionKey = event.details.sessionKey ?? "";
-    const rawBody = event.details.body ?? "";
+    const normalizedDetails = Object.entries(event.details).map(
+      ([key, detailValue]) => ({
+        key,
+        normalizedKey: key
+          .replace(/[-_]/gu, "")
+          .toLocaleLowerCase(),
+        detailValue,
+      }),
+    );
+    const rawSessionKey =
+      normalizedDetails.find(({ normalizedKey }) =>
+        ["sessionkey", "rawsessionkey"].includes(normalizedKey),
+      )?.detailValue ?? "";
+    const rawBody =
+      normalizedDetails.find(
+        ({ normalizedKey }) => normalizedKey === "body",
+      )?.detailValue ?? "";
     const blockedKeys = new Set([
       "body",
       "prompt",
       "response",
+      "cot",
       "chainofthought",
       "sessionkey",
+      "rawsessionkey",
     ]);
     const safeDetails = Object.fromEntries(
-      Object.entries(event.details).filter(
-        ([key]) =>
-          !blockedKeys.has(key.replace(/[-_]/gu, "").toLocaleLowerCase()),
-      ),
+      normalizedDetails
+        .filter(({ normalizedKey }) => !blockedKeys.has(normalizedKey))
+        .map(({ key, detailValue }) => [key, detailValue]),
     );
     const metadata = createAccessAuditMetadata({
       method: event.details.method ?? "POST",

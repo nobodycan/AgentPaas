@@ -1896,3 +1896,39 @@ test("hydration removes legacy raw access body and session identity before state
     /^session:/u,
   );
 });
+
+test("hydration purges legacy CoT and rawSessionKey aliases from access audit details", async () => {
+  const { createInitialDemoState, hydrateDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const legacy = createInitialDemoState();
+  const accessEvent = legacy.auditEvents.find(
+    (event) => event.kind === "ACCESS",
+  );
+  assert.ok(accessEvent);
+  accessEvent.details = {
+    ...accessEvent.details,
+    CoT: "LEGACY-PRIVATE-REASONING",
+    rawSessionKey: "legacy-raw-session-2048",
+  };
+
+  const hydrated = hydrateDemoState(JSON.stringify(legacy));
+  const hydratedEvent = hydrated.auditEvents.find(
+    (event) => event.id === accessEvent.id,
+  );
+  assert.ok(hydratedEvent);
+  const detailKeys = Object.keys(hydratedEvent.details).map((key) =>
+    key.toLocaleLowerCase(),
+  );
+  const persistedAgain = JSON.stringify(hydrated);
+
+  assert.ok(!detailKeys.includes("cot"));
+  assert.ok(!detailKeys.includes("rawsessionkey"));
+  assert.doesNotMatch(persistedAgain, /LEGACY-PRIVATE-REASONING/u);
+  assert.doesNotMatch(persistedAgain, /legacy-raw-session-2048/u);
+  assert.doesNotMatch(
+    Object.values(hydratedEvent.details).join(" "),
+    /LEGACY-PRIVATE-REASONING|legacy-raw-session-2048/u,
+  );
+  assert.match(hydratedEvent.actor, /^session:/u);
+});
