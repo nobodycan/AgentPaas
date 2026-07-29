@@ -16,6 +16,14 @@ import {
   filterEnvironments,
   validateWizardStep,
 } from "../lib/view-models.ts";
+import {
+  ACCESS_RESPONSE_TOKENS,
+  createAccessRequestSnapshot,
+  createAccessResponsePlan,
+  createAccessStreamState,
+  reduceAccessStream,
+  revisionDiff,
+} from "../lib/runtime-view-models.ts";
 import type { Environment } from "../lib/types.ts";
 
 test("selectInstance keeps demo-user-1024 on ins-a across repeated calls", () => {
@@ -65,6 +73,193 @@ test("selectInstance rejects routing when no instance is ready", () => {
       ]),
     /no ready instances/i,
   );
+});
+
+test("access response plan is deterministic and contains non-empty Chinese SSE tokens", () => {
+  const access = {
+    allowed: true,
+    sessionKey: "demo-user-1024",
+    environmentId: "env-production",
+    instanceId: "ins-a",
+    policyId: "egress-restricted",
+    destination: "/v1/chat",
+    auditEventId: "audit-access-test-001",
+    requestId: "req-demo-access-001",
+    request: createAccessRequestSnapshot({
+      method: "POST",
+      path: "/v1/chat",
+      body: '{"message":"hello"}',
+      sessionHeader: "X-Agent-Session-ID",
+      sessionValue: "demo-user-1024",
+    }),
+    message: "Access routed to ins-a",
+  };
+
+  const first = createAccessResponsePlan(access);
+  const second = createAccessResponsePlan(access);
+
+  assert.deepEqual(first, second);
+  assert.ok(first.tokens.length > 0);
+  assert.deepEqual(first.tokens, ACCESS_RESPONSE_TOKENS);
+  assert.ok(first.tokens.every((token) => token.trim().length > 0));
+  assert.ok(first.tokens.some((token) => /[\u3400-\u9fff]/u.test(token)));
+});
+
+test("access request snapshot records the submitted method, body, path, and session header", () => {
+  const submitted = createAccessRequestSnapshot({
+    method: "post",
+    path: " /v1/chat/completions ",
+    body: '{"message":"hello"}',
+    sessionHeader: " X-Agent-Session-ID ",
+    sessionValue: "demo-user-1024",
+  });
+
+  assert.deepEqual(submitted, {
+    method: "POST",
+    path: "/v1/chat/completions",
+    body: '{"message":"hello"}',
+    sessionHeader: "X-Agent-Session-ID",
+    sessionValue: "demo-user-1024",
+  });
+});
+
+test("access stream cancel keeps emitted text and rejects late or stale tokens", () => {
+  const started = reduceAccessStream(createAccessStreamState(), {
+    type: "start",
+    streamId: "stream-1",
+    requestId: "req-1",
+  });
+  const emitted = reduceAccessStream(started, {
+    type: "append",
+    streamId: "stream-1",
+    token: "你好",
+  });
+  const cancelled = reduceAccessStream(emitted, {
+    type: "cancel",
+    streamId: "stream-1",
+  });
+
+  assert.equal(cancelled.output, "你好");
+  assert.equal(cancelled.requestId, "req-1");
+  assert.equal(cancelled.status, "cancelled");
+  assert.deepEqual(
+    reduceAccessStream(cancelled, {
+      type: "append",
+      streamId: "stream-1",
+      token: "，这段不应出现",
+    }),
+    cancelled,
+  );
+  assert.deepEqual(
+    reduceAccessStream(cancelled, {
+      type: "append",
+      streamId: "stream-0",
+      token: "旧回调",
+    }),
+    cancelled,
+  );
+});
+
+test("starting a new access stream invalidates callbacks from the previous stream", () => {
+  const oldStream = reduceAccessStream(createAccessStreamState(), {
+    type: "start",
+    streamId: "stream-1",
+    requestId: "req-1",
+  });
+  const newStream = reduceAccessStream(oldStream, {
+    type: "start",
+    streamId: "stream-2",
+    requestId: "req-2",
+  });
+  const afterStaleAppend = reduceAccessStream(newStream, {
+    type: "append",
+    streamId: "stream-1",
+    token: "旧响应",
+  });
+
+  assert.equal(newStream.streamId, "stream-2");
+  assert.equal(newStream.requestId, "req-2");
+  assert.equal(newStream.output, "");
+  assert.deepEqual(afterStaleAppend, newStream);
+});
+
+test("revisionDiff exposes image, digest, status, configuration changes, and failure reason", async () => {
+  const { FAILED_REVISION_ID, STABLE_REVISION_ID } = await import(
+    "../lib/mock-data.ts"
+  );
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const stable = state.revisions.find(
+    (revision) => revision.id === STABLE_REVISION_ID,
+  );
+  const failed = state.revisions.find(
+    (revision) => revision.id === FAILED_REVISION_ID,
+  );
+  assert.ok(stable);
+  assert.ok(failed);
+
+  const diff = revisionDiff(stable, failed);
+
+  assert.equal(diff.fromRevisionId, STABLE_REVISION_ID);
+  assert.equal(diff.toRevisionId, FAILED_REVISION_ID);
+  assert.ok(diff.failureReason);
+  assert.ok(
+    ["image", "digest", "status", "runtimePlan", "ingress", "egress"].every(
+      (field) => diff.changes.some((change) => change.field === field),
+    ),
+  );
+  assert.ok(diff.changes.every((change) => change.before !== change.after));
+});
+
+test("replaceEnvironmentInstance drains one ready instance and creates one deterministic ready replacement", async () => {
+  const stateModule = await import("../lib/demo-state.ts");
+  const initial = stateModule.createInitialDemoState();
+  const environmentId = "env-customer-service-prod";
+  const instanceId = "ins-cs-01";
+  const beforeEnvironment = initial.environments.find(
+    (environment) => environment.id === environmentId,
+  );
+  assert.ok(beforeEnvironment);
+
+  const replaced = stateModule.replaceEnvironmentInstance(
+    initial,
+    environmentId,
+    instanceId,
+  );
+  const oldInstance = replaced.instances.find(
+    (instance) => instance.id === instanceId,
+  );
+  const replacement = replaced.instances.find(
+    (instance) =>
+      instance.environmentId === environmentId &&
+      instance.id !== instanceId &&
+      instance.id.startsWith(`${instanceId}-replacement-`),
+  );
+  const afterEnvironment = replaced.environments.find(
+    (environment) => environment.id === environmentId,
+  );
+  const replacementAudits = replaced.auditEvents.filter(
+    (event) =>
+      event.type === "INSTANCE_REPLACE" &&
+      event.details.instanceId === instanceId,
+  );
+
+  assert.equal(oldInstance?.status, "Draining");
+  assert.equal(replacement?.status, "Ready");
+  assert.equal(replacement?.revisionId, oldInstance?.revisionId);
+  assert.equal(replacement?.clusterId, oldInstance?.clusterId);
+  assert.equal(
+    afterEnvironment?.readyInstances,
+    beforeEnvironment.readyInstances,
+  );
+  assert.equal(replacementAudits.length, 1);
+
+  const repeated = stateModule.replaceEnvironmentInstance(
+    replaced,
+    environmentId,
+    instanceId,
+  );
+  assert.deepEqual(repeated, replaced);
 });
 
 test("deploymentStateAt keeps the endpoint unavailable while deploying", () => {

@@ -15,6 +15,7 @@ import {
   createEnvironment as createEnvironmentState,
   enumeratePendingTransitions,
   isCurrentGeneration,
+  replaceEnvironmentInstance,
   resolveDemoStateForRender,
   resetDemoState,
   rollbackEnvironment,
@@ -24,11 +25,13 @@ import type {
   PendingIsolationTransition,
 } from "./demo-state.ts";
 import { selectInstance } from "./demo-engine.ts";
+import { createAccessRequestSnapshot } from "./runtime-view-models.ts";
 import {
   OPEN_INCIDENT_ID,
   PRIMARY_ENVIRONMENT_ID,
 } from "./mock-data.ts";
 import type {
+  AccessRequestSnapshot,
   AccessResult,
   AuditEvent,
   CreateEnvironmentInput,
@@ -47,7 +50,9 @@ export interface DemoActions {
     environmentId: string,
     sessionKey?: string,
     destination?: string,
+    request?: AccessRequestSnapshot,
   ): AccessResult;
+  replaceInstance(environmentId: string, instanceId: string): void;
   rollback(environmentId?: string): void;
   advanceIsolation(incidentId?: string, step?: number): void;
   resetDemo(): void;
@@ -282,6 +287,7 @@ export function DemoProvider({
       environmentId: string,
       sessionKey = "demo-user-1024",
       destination = "https://approved.example.invalid/health",
+      request?: AccessRequestSnapshot,
     ): AccessResult => {
       const current = stateRef.current;
       const environment = current.environments.find(
@@ -290,11 +296,24 @@ export function DemoProvider({
       const environmentInstances = current.instances.filter(
         (instance) => instance.environmentId === environmentId,
       );
+      const submittedRequest =
+        request ??
+        createAccessRequestSnapshot({
+          method: "POST",
+          path: destination,
+          body: "",
+          sessionHeader:
+            environment?.sessionHeader ?? "X-Agent-Session-ID",
+          sessionValue: sessionKey,
+        });
       let instanceId: string | undefined;
       let allowed = false;
 
       try {
-        instanceId = selectInstance(sessionKey, environmentInstances).id;
+        instanceId = selectInstance(
+          submittedRequest.sessionValue,
+          environmentInstances,
+        ).id;
         allowed = Boolean(environment);
       } catch {
         allowed = false;
@@ -307,14 +326,20 @@ export function DemoProvider({
         3,
         "0",
       )}`;
+      const requestId = `req-demo-access-${String(accessOrdinal).padStart(
+        3,
+        "0",
+      )}`;
       const result: AccessResult = {
         allowed,
-        sessionKey,
+        sessionKey: submittedRequest.sessionValue,
         environmentId,
         instanceId,
         policyId: environment?.egressProfileId ?? "egress-restricted",
-        destination,
+        destination: submittedRequest.path,
         auditEventId,
+        requestId,
+        request: submittedRequest,
         message: allowed
           ? `Access routed to ${instanceId}`
           : "Access denied because no ready instance is available",
@@ -323,15 +348,12 @@ export function DemoProvider({
         id: auditEventId,
         kind: "ACCESS",
         type: "ACCESS_TEST",
-        actor: sessionKey,
+        actor: submittedRequest.sessionValue,
         targetId: instanceId ?? environmentId,
         occurredAt: providerTimestamp(current.auditEvents.length),
         summary: result.message,
         details: {
-          requestId: `req-demo-access-${String(accessOrdinal).padStart(
-            3,
-            "0",
-          )}`,
+          requestId,
           operationId: `op-demo-access-${String(accessOrdinal).padStart(
             3,
             "0",
@@ -340,7 +362,12 @@ export function DemoProvider({
           environmentId,
           instanceId: instanceId ?? "none",
           policyId: result.policyId,
-          destination,
+          destination: submittedRequest.path,
+          method: submittedRequest.method,
+          path: submittedRequest.path,
+          body: submittedRequest.body,
+          sessionHeader: submittedRequest.sessionHeader,
+          sessionValue: submittedRequest.sessionValue,
           decision: allowed ? "ALLOW" : "DENY",
         },
       };
@@ -384,6 +411,15 @@ export function DemoProvider({
     [commit],
   );
 
+  const replaceInstance = useCallback(
+    (environmentId: string, instanceId: string) => {
+      commit((current) =>
+        replaceEnvironmentInstance(current, environmentId, instanceId),
+      );
+    },
+    [commit],
+  );
+
   const advanceIsolation = useCallback(
     (incidentId = OPEN_INCIDENT_ID, step?: number) => {
       const current = stateRef.current;
@@ -419,6 +455,7 @@ export function DemoProvider({
       createEnvironment,
       advanceDeployment,
       runAccessTest,
+      replaceInstance,
       rollback,
       advanceIsolation,
       resetDemo,
@@ -428,6 +465,7 @@ export function DemoProvider({
       advanceIsolation,
       createEnvironment,
       resetDemo,
+      replaceInstance,
       rollback,
       runAccessTest,
       state,

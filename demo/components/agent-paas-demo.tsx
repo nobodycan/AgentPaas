@@ -11,20 +11,16 @@ import React, {
 
 import {
   CreateEnvironmentWizard,
-  DeploymentStatusPanel,
   EnvironmentListPage,
 } from "../features/environments";
+import { EnvironmentDetailPanel } from "../features/environment-detail";
 import { OverviewPage } from "../features/overview";
 import { useDemo } from "../lib/demo-store";
 import {
-  ENVIRONMENT_TABS,
   isProductPath,
   parseRoute,
 } from "../lib/routes";
-import type {
-  AppRoute,
-  EnvironmentTab,
-} from "../lib/routes";
+import type { AppRoute } from "../lib/routes";
 import type {
   AuditEvent,
   Cluster,
@@ -36,23 +32,11 @@ import {
   DataTable,
   EmptyState,
   StatusBadge,
-  Tabs,
 } from "./ui";
 import type {
   DataTableColumn,
   StatusTone,
 } from "./ui";
-
-const DETAIL_TAB_LABELS: Record<EnvironmentTab, string> = {
-  overview: "概览",
-  access: "访问测试",
-  config: "配置",
-  instances: "实例",
-  revisions: "版本",
-  observability: "可观测性",
-  security: "安全",
-  operations: "操作",
-};
 
 function statusTone(status: string): StatusTone {
   if (
@@ -109,73 +93,6 @@ function PageHeader({
       </div>
       {action ? <div className="page-header__action">{action}</div> : null}
     </header>
-  );
-}
-
-function EnvironmentDetailPanel({
-  environmentId,
-  tab,
-  onNavigate,
-}: {
-  environmentId: string;
-  tab: EnvironmentTab;
-  onNavigate(destination: string): void;
-}): React.ReactElement {
-  const {
-    environments,
-    deploymentSteps,
-  } = useDemo();
-  const environment = environments.find(
-    (candidate) => candidate.id === environmentId,
-  );
-  const tabs = ENVIRONMENT_TABS.map((tabValue) => ({
-    value: tabValue,
-    label: DETAIL_TAB_LABELS[tabValue],
-    href: `/environments/${encodeURIComponent(environmentId)}/${tabValue}`,
-  }));
-
-  return (
-    <section aria-labelledby="environment-detail-title">
-      <PageHeader
-        eyebrow="运行环境详情"
-        title={environment?.name ?? environmentId}
-        description={
-          environment
-            ? `${environment.project} · ${environment.owner}`
-            : "该演示环境不在当前数据集中，但路由仍可用于查看页面结构。"
-        }
-        action={
-          environment ? (
-            <StatusBadge tone={statusTone(environment.status)}>
-              {environment.status}
-            </StatusBadge>
-          ) : undefined
-        }
-      />
-      <span id="environment-detail-title" className="sr-only">
-        运行环境详情
-      </span>
-      <Tabs
-        label="运行环境详情"
-        items={tabs}
-        activeValue={tab}
-      />
-      {tab === "overview" &&
-      deploymentSteps[environmentId] !== undefined ? (
-        <DeploymentStatusPanel
-          environmentId={environmentId}
-          onNavigate={onNavigate}
-        />
-      ) : null}
-      <section className="content-card detail-placeholder">
-        <p className="eyebrow">详情页签</p>
-        <h2>{DETAIL_TAB_LABELS[tab]}</h2>
-        <p>
-          {DETAIL_TAB_LABELS[tab]}面板将在后续功能任务中接入完整交互。
-          当前页面保留真实可点击的八个页签与直接刷新路径。
-        </p>
-      </section>
-    </section>
   );
 }
 

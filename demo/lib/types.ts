@@ -67,6 +67,10 @@ export interface Revision {
   sequence: number;
   image: string;
   imageDigest?: string;
+  runtimePlanId?: string;
+  ingressProfileId?: string;
+  egressProfileId?: string;
+  failureReason?: string;
   status: RevisionStatus;
   createdAt: string;
   createdBy: string;
@@ -156,6 +160,14 @@ export interface CreateEnvironmentInput {
   domainProfileId?: string;
 }
 
+export interface AccessRequestSnapshot {
+  method: string;
+  path: string;
+  body: string;
+  sessionHeader: string;
+  sessionValue: string;
+}
+
 export interface AccessResult {
   allowed: boolean;
   sessionKey: string;
@@ -164,6 +176,8 @@ export interface AccessResult {
   policyId: string;
   destination: string;
   auditEventId: string;
+  requestId: string;
+  request: AccessRequestSnapshot;
   message: string;
 }
 

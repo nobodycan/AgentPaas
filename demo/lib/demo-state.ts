@@ -172,6 +172,10 @@ function isRevision(value: unknown): boolean {
     value.sequence >= 0 &&
     isString(value.image) &&
     isOptionalString(value.imageDigest) &&
+    isOptionalString(value.runtimePlanId) &&
+    isOptionalString(value.ingressProfileId) &&
+    isOptionalString(value.egressProfileId) &&
+    isOptionalString(value.failureReason) &&
     isString(value.status) &&
     new Set([
       "Pending",
@@ -720,6 +724,75 @@ export function rollbackEnvironment(
           operationId: `op-demo-rollback-${environmentId}`,
           taskId: `task-demo-rollback-${environmentId}`,
           environmentId,
+        },
+      },
+    ],
+  };
+}
+
+export function replaceEnvironmentInstance(
+  state: DemoState,
+  environmentId: string,
+  instanceId: string,
+): DemoState {
+  const environment = state.environments.find(
+    (candidate) => candidate.id === environmentId,
+  );
+  const instance = state.instances.find(
+    (candidate) =>
+      candidate.id === instanceId &&
+      candidate.environmentId === environmentId,
+  );
+  const auditId = `audit-instance-replace-${environmentId}-${instanceId}`;
+
+  if (
+    !environment ||
+    !instance ||
+    instance.status !== "Ready" ||
+    state.auditEvents.some((event) => event.id === auditId)
+  ) {
+    return state;
+  }
+
+  const replacementId = `${instanceId}-replacement-01`;
+  if (state.instances.some((candidate) => candidate.id === replacementId)) {
+    return state;
+  }
+
+  const replacement: Instance = {
+    ...instance,
+    id: replacementId,
+    status: "Ready",
+    startedAt: deterministicTimestamp(state.auditEvents.length + 400),
+  };
+
+  return {
+    ...state,
+    instances: [
+      ...state.instances.map((candidate) =>
+        candidate.id === instanceId
+          ? { ...candidate, status: "Draining" as const }
+          : candidate,
+      ),
+      replacement,
+    ],
+    auditEvents: [
+      ...state.auditEvents,
+      {
+        id: auditId,
+        kind: "RUNTIME",
+        type: "INSTANCE_REPLACE",
+        actor: "demo.operator",
+        targetId: instanceId,
+        occurredAt: deterministicTimestamp(state.auditEvents.length + 401),
+        summary: `Drained ${instanceId} and started ${replacementId}`,
+        details: {
+          requestId: `req-demo-replace-${instanceId}`,
+          operationId: `op-demo-replace-${instanceId}`,
+          taskId: `task-demo-replace-${instanceId}`,
+          environmentId,
+          instanceId,
+          replacementInstanceId: replacementId,
         },
       },
     ],
