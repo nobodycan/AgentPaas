@@ -817,6 +817,60 @@ test("deployment progress uses the eight approved business labels in order", () 
   ]);
 });
 
+test("resolveImageDigest returns a stable demo sha256-shaped digest for a tagged image", async () => {
+  const viewModels = await import("../lib/view-models.ts");
+  const resolveImageDigest = Reflect.get(
+    viewModels,
+    "resolveImageDigest",
+  );
+  assert.equal(typeof resolveImageDigest, "function");
+
+  const image =
+    "registry.internal.example.com/agents/procurement-assistant:1.4.0";
+  const digest = resolveImageDigest(image);
+
+  assert.match(digest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(resolveImageDigest(image), digest);
+  assert.notEqual(
+    resolveImageDigest(
+      "registry.internal.example.com/agents/procurement-assistant:1.4.1",
+    ),
+    digest,
+  );
+});
+
+test("createEnvironment records the stable digest while preserving the original image tag", async () => {
+  const { createEnvironment, createInitialDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const image =
+    "registry.internal.example.com/agents/procurement-assistant:1.4.0";
+  const input = {
+    name: "Procurement Digest Evidence",
+    project: "supply-chain / production",
+    owner: "Wang Min",
+    image,
+    containerPort: 8080,
+    desiredInstances: 2,
+    runtimePlanId: "balanced-2c4g",
+    ingressProfileId: "internal-sso-sse",
+    egressProfileId: "approved-model-and-tools",
+    endpointVisibility: "internal",
+    sessionHeader: "X-Agent-Session-ID",
+  };
+  const first = createEnvironment(createInitialDemoState(), input);
+  const second = createEnvironment(createInitialDemoState(), input);
+  const firstRevision = first.revisions.at(-1);
+  const secondRevision = second.revisions.at(-1);
+
+  assert.equal(firstRevision?.image, image);
+  assert.match(
+    firstRevision?.imageDigest ?? "",
+    /^sha256:[0-9a-f]{64}$/,
+  );
+  assert.equal(firstRevision?.imageDigest, secondRevision?.imageDigest);
+});
+
 test("overview metrics derive live counts and investment outcomes are marked as mock", async () => {
   const { createInitialDemoState } = await import("../lib/demo-state.ts");
   const state = createInitialDemoState();
@@ -927,4 +981,54 @@ test("copyEndpoint falls back to a temporary textarea and reports the real execC
     }),
     false,
   );
+});
+
+test("copyEndpoint restores the previously focused element after fallback success or failure", async () => {
+  const { copyEndpoint } = await import("../lib/clipboard.ts");
+
+  for (const commandResult of [true, false]) {
+    const events: string[] = [];
+    const previouslyFocused = {
+      focus() {
+        events.push("restore-focus");
+      },
+    };
+    const textarea = {
+      value: "",
+      style: {} as Record<string, string>,
+      setAttribute() {},
+      focus() {
+        events.push("textarea-focus");
+      },
+      select() {},
+    };
+    const document = {
+      activeElement: previouslyFocused,
+      body: {
+        appendChild() {},
+        removeChild() {
+          events.push("remove");
+        },
+      },
+      createElement() {
+        return textarea;
+      },
+      execCommand() {
+        return commandResult;
+      },
+    };
+
+    assert.equal(
+      await copyEndpoint("https://focus.example.test", {
+        clipboard: null,
+        document,
+      }),
+      commandResult,
+    );
+    assert.deepEqual(events, [
+      "textarea-focus",
+      "remove",
+      "restore-focus",
+    ]);
+  }
 });

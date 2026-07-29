@@ -81,6 +81,35 @@ export const INVESTMENT_OUTCOMES = [
   },
 ] as const;
 
+export function resolveImageDigest(image: string): string {
+  const normalizedImage = image.trim();
+  const words = Array.from({ length: 8 }, (_, wordIndex) => {
+    let hash = (
+      0x811c9dc5 ^
+      Math.imul(wordIndex + 1, 0x9e3779b1)
+    ) >>> 0;
+
+    for (
+      let characterIndex = 0;
+      characterIndex < normalizedImage.length;
+      characterIndex += 1
+    ) {
+      hash ^=
+        normalizedImage.charCodeAt(characterIndex) +
+        wordIndex * 31;
+      hash = Math.imul(hash, 0x01000193);
+      hash ^= hash >>> 13;
+    }
+
+    hash ^= normalizedImage.length + wordIndex;
+    hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+    hash ^= hash >>> 16;
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  });
+
+  return `sha256:${words.join("")}`;
+}
+
 function uniqueSorted<T extends string>(values: readonly T[]): T[] {
   return [...new Set(values)].sort((left, right) =>
     left.localeCompare(right),

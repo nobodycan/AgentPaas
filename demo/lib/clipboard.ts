@@ -11,6 +11,9 @@ export interface LegacyCopyTextarea {
 }
 
 export interface LegacyCopyDocument {
+  activeElement?: {
+    focus(): void;
+  } | null;
   body: {
     appendChild(element: LegacyCopyTextarea): unknown;
     removeChild(element: LegacyCopyTextarea): unknown;
@@ -58,6 +61,7 @@ export async function copyEndpoint(
     return false;
   }
 
+  const previouslyFocused = environment.document.activeElement;
   const textarea = environment.document.createElement("textarea");
   textarea.value = endpoint;
   textarea.setAttribute("readonly", "");
@@ -72,6 +76,15 @@ export async function copyEndpoint(
   } catch {
     return false;
   } finally {
-    environment.document.body.removeChild(textarea);
+    try {
+      environment.document.body.removeChild(textarea);
+    } catch {
+      // The copy result remains authoritative if external DOM code removed it.
+    }
+    try {
+      previouslyFocused?.focus();
+    } catch {
+      // A detached prior element can reject focus without changing copy status.
+    }
   }
 }

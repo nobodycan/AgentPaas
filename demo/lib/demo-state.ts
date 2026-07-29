@@ -3,6 +3,7 @@ import {
   isolationStateAt,
   rollbackRevision,
 } from "./demo-engine.ts";
+import { resolveImageDigest } from "./view-models.ts";
 import {
   MOCK_AUDIT_EVENTS,
   MOCK_CLUSTERS,
@@ -170,6 +171,7 @@ function isRevision(value: unknown): boolean {
     isSafeInteger(value.sequence) &&
     value.sequence >= 0 &&
     isString(value.image) &&
+    isOptionalString(value.imageDigest) &&
     isString(value.status) &&
     new Set([
       "Pending",
@@ -386,13 +388,15 @@ export function createEnvironment(
     loggingProfileId: input.loggingProfileId ?? "logging-audit",
     domainProfileId: input.domainProfileId,
   };
+  const image =
+    input.image?.trim() ||
+    `registry.demo.local/${slugify(input.project || input.name)}:draft-${revisionSequence}`;
   const revision: Revision = {
     id: revisionId,
     environmentId,
     sequence: revisionSequence,
-    image:
-      input.image?.trim() ||
-      `registry.demo.local/${slugify(input.project || input.name)}:draft-${revisionSequence}`,
+    image,
+    imageDigest: resolveImageDigest(image),
     status: "Pending",
     createdAt,
     createdBy: environment.owner,

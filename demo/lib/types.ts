@@ -66,6 +66,7 @@ export interface Revision {
   environmentId: string;
   sequence: number;
   image: string;
+  imageDigest?: string;
   status: RevisionStatus;
   createdAt: string;
   createdBy: string;
