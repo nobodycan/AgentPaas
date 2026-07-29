@@ -16,30 +16,27 @@ export interface AccessAuditMetadata {
   bodyPresent: "true" | "false";
   contentCaptured: "false";
   sessionHeaderName: string;
-  sessionKeyHash: string;
-  sessionKeyLength: number;
+  sessionTokenId: string;
 }
 
-function fnv1a64(value: string): string {
-  let high = 0xcbf29ce4;
-  let low = 0x84222325;
-  const bytes = new TextEncoder().encode(value);
+export const PRODUCTION_SESSION_TOKENIZATION_NOTE =
+  "演示令牌仅按 Request ID 合成；生产应由审计服务端使用 HMAC 或令牌化服务生成不可枚举标识。";
 
-  for (const byte of bytes) {
-    low = (low ^ byte) >>> 0;
-    const lowProduct = low * 0x1b3;
-    const carry = Math.floor(lowProduct / 0x1_0000_0000);
-    high = (high * 0x1b3 + low * 0x100 + carry) >>> 0;
-    low = lowProduct >>> 0;
-  }
+export interface AccessAuditContext {
+  requestId: string;
+}
 
-  return `${high.toString(16).padStart(8, "0")}${low
-    .toString(16)
-    .padStart(8, "0")}`;
+function normalizedRequestId(requestId: string): string {
+  return encodeURIComponent(requestId.trim() || "unavailable");
+}
+
+export function createSyntheticSessionToken(requestId: string): string {
+  return `demo-session:${normalizedRequestId(requestId)}`;
 }
 
 export function createAccessAuditMetadata(
-  request: AccessRequestSnapshot,
+  request: Omit<AccessRequestSnapshot, "sessionKey">,
+  context: AccessAuditContext,
 ): AccessAuditMetadata {
   return {
     method: request.method,
@@ -48,13 +45,113 @@ export function createAccessAuditMetadata(
     bodyPresent: request.body.length > 0 ? "true" : "false",
     contentCaptured: "false",
     sessionHeaderName: request.sessionHeaderName,
-    sessionKeyHash: `fnv1a64:${fnv1a64(request.sessionKey)}`,
-    sessionKeyLength: request.sessionKey.length,
+    sessionTokenId: createSyntheticSessionToken(context.requestId),
   };
 }
 
-export function pseudonymousAccessActor(sessionKey: string): string {
-  return `session:${fnv1a64(sessionKey).slice(0, 12)}`;
+export function syntheticAccessActor(requestId: string): string {
+  return `access-client:${normalizedRequestId(requestId)}`;
+}
+
+const COMMON_AUDIT_FIELDS = [
+  "requestId",
+  "operationId",
+  "taskId",
+  "environmentId",
+  "status",
+  "result",
+] as const;
+
+const AUDIT_DETAIL_ALLOWLIST: Readonly<
+  Record<AuditKind, ReadonlySet<string>>
+> = {
+  CONTROL_PLANE: new Set([
+    ...COMMON_AUDIT_FIELDS,
+    "revisionId",
+    "failedRevisionId",
+    "stableRevisionId",
+    "stage",
+    "reason",
+  ]),
+  ACCESS: new Set([
+    ...COMMON_AUDIT_FIELDS,
+    "instanceId",
+    "policyId",
+    "destination",
+    "reason",
+    "method",
+    "path",
+    "decision",
+    "bodyBytes",
+    "bodyPresent",
+    "contentCaptured",
+    "sessionHeaderName",
+    "sessionTokenId",
+  ]),
+  SECURITY: new Set([
+    ...COMMON_AUDIT_FIELDS,
+    "incidentId",
+    "instanceId",
+    "policyId",
+    "destination",
+    "decision",
+    "reason",
+    "stage",
+  ]),
+  RUNTIME: new Set([
+    ...COMMON_AUDIT_FIELDS,
+    "instanceId",
+    "replacementInstanceId",
+    "revisionId",
+    "stage",
+    "reason",
+  ]),
+};
+
+export function sanitizeAuditDetails(
+  kind: AuditKind,
+  details: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> {
+  const allowed = AUDIT_DETAIL_ALLOWLIST[kind];
+  return Object.fromEntries(
+    Object.entries(details).filter(([key]) => allowed.has(key)),
+  );
+}
+
+export function auditDetailsForDisplay(
+  event: Pick<AuditEvent, "kind" | "details">,
+): Readonly<Record<string, string>> {
+  return sanitizeAuditDetails(event.kind, event.details);
+}
+
+export function sanitizeAuditEvent(event: AuditEvent): AuditEvent {
+  const details = sanitizeAuditDetails(event.kind, event.details);
+  if (event.kind !== "ACCESS") {
+    return {
+      ...event,
+      details,
+    };
+  }
+
+  const requestId = details.requestId ?? event.id;
+  return {
+    ...event,
+    actor: syntheticAccessActor(requestId),
+    details: {
+      ...details,
+      bodyBytes: details.bodyBytes ?? "unknown",
+      bodyPresent: details.bodyPresent ?? "unknown",
+      contentCaptured: "false",
+      sessionTokenId:
+        details.sessionTokenId ?? createSyntheticSessionToken(requestId),
+    },
+  };
+}
+
+export function sanitizeAuditEvents(
+  events: readonly AuditEvent[],
+): AuditEvent[] {
+  return events.map(sanitizeAuditEvent);
 }
 
 export type AuditCenterCategory =
@@ -106,14 +203,15 @@ export function filterAuditCenterEvents(
   filters: AuditCenterFilters,
 ): AuditEvent[] {
   const correlation = filters.correlation.trim();
+  const timeRows = filterByTime(events, filters.timeRange);
   const correlationRows = correlation
-    ? filterAuditEventsByCorrelation(events, correlation)
-    : [...events];
+    ? filterAuditEventsByCorrelation(timeRows, correlation)
+    : timeRows;
   const actor = filters.actor.trim();
   const environmentId = filters.environmentId.trim();
   const result = filters.result.trim();
 
-  return filterByTime(correlationRows, filters.timeRange)
+  return correlationRows
     .filter((event) =>
       filters.category === "operations"
         ? event.kind === "CONTROL_PLANE" || event.kind === "RUNTIME"

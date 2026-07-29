@@ -194,7 +194,7 @@ export function EnvironmentListPage({
       },
       {
         id: "revision",
-        header: "当前 Revision",
+        header: "Desired Revision",
         render: ({ environment }) => environment.desiredRevisionId,
       },
       {

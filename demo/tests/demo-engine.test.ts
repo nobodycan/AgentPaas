@@ -679,6 +679,124 @@ test("initial demo state exposes the complete deterministic control-plane datase
   );
 });
 
+test("primary environment desires failed rev-43 while Ready instances actively serve stable rev-42", async () => {
+  const {
+    FAILED_REVISION_ID,
+    PRIMARY_ENVIRONMENT_ID,
+    STABLE_REVISION_ID,
+  } = await import("../lib/mock-data.ts");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const deriveActiveRevisionId = Reflect.get(
+    runtimeViewModels,
+    "deriveActiveRevisionId",
+  );
+  assert.equal(typeof deriveActiveRevisionId, "function");
+  const state = createInitialDemoState();
+  const environment = state.environments.find(
+    (candidate) => candidate.id === PRIMARY_ENVIRONMENT_ID,
+  );
+  assert.ok(environment);
+
+  assert.equal(environment.desiredRevisionId, FAILED_REVISION_ID);
+  assert.equal(environment.status, "Running");
+  assert.ok(environment.endpoint);
+  assert.equal(
+    deriveActiveRevisionId(
+      environment.id,
+      state.instances,
+      environment.desiredRevisionId,
+    ),
+    STABLE_REVISION_ID,
+  );
+});
+
+test("deriveActiveRevisionId uses deterministic Ready majority and fallback", async () => {
+  const runtimeViewModels = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const deriveActiveRevisionId = Reflect.get(
+    runtimeViewModels,
+    "deriveActiveRevisionId",
+  );
+  assert.equal(typeof deriveActiveRevisionId, "function");
+  const instances = [
+    {
+      id: "ins-1",
+      environmentId: "env-a",
+      revisionId: "rev-b",
+      status: "Ready",
+    },
+    {
+      id: "ins-2",
+      environmentId: "env-a",
+      revisionId: "rev-a",
+      status: "Ready",
+    },
+    {
+      id: "ins-3",
+      environmentId: "env-a",
+      revisionId: "rev-b",
+      status: "Draining",
+    },
+  ];
+
+  assert.equal(
+    deriveActiveRevisionId("env-a", instances, "rev-fallback"),
+    "rev-a",
+  );
+  assert.equal(
+    deriveActiveRevisionId("env-missing", instances, "rev-fallback"),
+    "rev-fallback",
+  );
+});
+
+test("rollbackEnvironment changes desired revision once and records one idempotent audit", async () => {
+  const {
+    FAILED_REVISION_ID,
+    PRIMARY_ENVIRONMENT_ID,
+    STABLE_REVISION_ID,
+  } = await import("../lib/mock-data.ts");
+  const {
+    createInitialDemoState,
+    rollbackEnvironment,
+  } = await import("../lib/demo-state.ts");
+  const initial = createInitialDemoState();
+  const before = initial.environments.find(
+    (environment) => environment.id === PRIMARY_ENVIRONMENT_ID,
+  );
+  assert.equal(before?.desiredRevisionId, FAILED_REVISION_ID);
+
+  const rolledBack = rollbackEnvironment(
+    initial,
+    PRIMARY_ENVIRONMENT_ID,
+  );
+  const after = rolledBack.environments.find(
+    (environment) => environment.id === PRIMARY_ENVIRONMENT_ID,
+  );
+  const rollbackAudits = rolledBack.auditEvents.filter(
+    (event) =>
+      event.type === "REVISION_ROLLBACK" &&
+      event.details.environmentId === PRIMARY_ENVIRONMENT_ID,
+  );
+
+  assert.notEqual(after?.desiredRevisionId, before?.desiredRevisionId);
+  assert.equal(after?.desiredRevisionId, STABLE_REVISION_ID);
+  assert.equal(
+    rolledBack.revisions.find(
+      (revision) => revision.id === FAILED_REVISION_ID,
+    )?.status,
+    "RolledBack",
+  );
+  assert.equal(rollbackAudits.length, 1);
+  assert.deepEqual(
+    rollbackEnvironment(rolledBack, PRIMARY_ENVIRONMENT_ID),
+    rolledBack,
+  );
+});
+
 test("createInitialDemoState returns independent copies", async () => {
   const { createInitialDemoState } = await import("../lib/demo-state.ts");
   const first = createInitialDemoState();
@@ -1561,50 +1679,152 @@ async function governanceModule(): Promise<Record<string, unknown>> {
   return import("../lib/governance-view-models.ts").catch(() => ({}));
 }
 
-test("access audit metadata never stores raw request content or session identity", async () => {
+test("access audit metadata uses request context, never low-entropy session input", async () => {
   const governance = await governanceModule();
   const createAccessAuditMetadata = Reflect.get(
     governance,
     "createAccessAuditMetadata",
   );
-  const pseudonymousAccessActor = Reflect.get(
+  const syntheticAccessActor = Reflect.get(
     governance,
-    "pseudonymousAccessActor",
+    "syntheticAccessActor",
+  );
+  const productionNote = Reflect.get(
+    governance,
+    "PRODUCTION_SESSION_TOKENIZATION_NOTE",
   );
   assert.equal(typeof createAccessAuditMetadata, "function");
-  assert.equal(typeof pseudonymousAccessActor, "function");
+  assert.equal(typeof syntheticAccessActor, "function");
+  assert.equal(typeof productionNote, "string");
 
-  const request = createAccessRequestSnapshot({
+  const firstRequest = createAccessRequestSnapshot({
     method: "POST",
     path: "/v1/chat/completions",
     body: '{"prompt":"TOP-SECRET-CUSTOMER-PROMPT"}',
     sessionHeaderName: "X-Agent-Session-ID",
-    sessionKey: "private-session-key-1024",
+    sessionKey: "1",
   });
-  const metadata = createAccessAuditMetadata(request);
-  const serialized = JSON.stringify(metadata);
+  const secondRequest = {
+    ...firstRequest,
+    sessionKey: "2",
+  };
+  const context = { requestId: "req-demo-access-001" };
+  const firstMetadata = createAccessAuditMetadata(firstRequest, context);
+  const secondMetadata = createAccessAuditMetadata(secondRequest, context);
+  const serialized = JSON.stringify(firstMetadata);
 
-  assert.deepEqual(Object.keys(metadata).sort(), [
+  assert.deepEqual(firstMetadata, secondMetadata);
+  assert.deepEqual(Object.keys(firstMetadata).sort(), [
     "bodyBytes",
     "bodyPresent",
     "contentCaptured",
     "method",
     "path",
     "sessionHeaderName",
-    "sessionKeyHash",
-    "sessionKeyLength",
+    "sessionTokenId",
   ]);
-  assert.equal(metadata.bodyBytes, 39);
-  assert.equal(metadata.bodyPresent, "true");
-  assert.equal(metadata.contentCaptured, "false");
-  assert.match(metadata.sessionKeyHash, /^fnv1a64:[0-9a-f]{16}$/u);
-  assert.equal(metadata.sessionKeyLength, 24);
-  assert.doesNotMatch(serialized, /TOP-SECRET|CUSTOMER-PROMPT/u);
-  assert.doesNotMatch(serialized, /private-session-key-1024/u);
-  assert.doesNotMatch(
-    pseudonymousAccessActor(request.sessionKey),
-    /private-session-key-1024/u,
+  assert.equal(firstMetadata.bodyBytes, 39);
+  assert.equal(firstMetadata.bodyPresent, "true");
+  assert.equal(firstMetadata.contentCaptured, "false");
+  assert.match(
+    firstMetadata.sessionTokenId,
+    /^demo-session:req-demo-access-001$/u,
   );
+  assert.ok(!("sessionKeyHash" in firstMetadata));
+  assert.ok(!("sessionKeyLength" in firstMetadata));
+  assert.doesNotMatch(serialized, /TOP-SECRET|CUSTOMER-PROMPT/u);
+  assert.doesNotMatch(serialized, /"1"|"2"/u);
+  assert.doesNotMatch(
+    syntheticAccessActor(context.requestId),
+    /sessionKey|fnv|hash/iu,
+  );
+  assert.match(productionNote, /服务端.*HMAC|HMAC.*服务端/u);
+  assert.match(productionNote, /令牌化/u);
+});
+
+test("audit detail allowlists drop sensitive aliases for every audit kind and display path", async () => {
+  const governance = await governanceModule();
+  const sanitizeAuditDetails = Reflect.get(
+    governance,
+    "sanitizeAuditDetails",
+  );
+  const auditDetailsForDisplay = Reflect.get(
+    governance,
+    "auditDetailsForDisplay",
+  );
+  assert.equal(typeof sanitizeAuditDetails, "function");
+  assert.equal(typeof auditDetailsForDisplay, "function");
+
+  const sensitiveDetails = {
+    requestId: "req-safe-001",
+    operationId: "op-safe-001",
+    taskId: "task-safe-001",
+    environmentId: "env-safe",
+    revisionId: "rev-safe",
+    instanceId: "ins-safe",
+    replacementInstanceId: "ins-safe-replacement",
+    policyId: "policy-safe",
+    incidentId: "incident-safe",
+    destination: "approved.example.invalid:443",
+    reason: "safe reason",
+    method: "POST",
+    path: "/v1/chat/completions",
+    status: "SUCCESS",
+    result: "SUCCESS",
+    bodyBytes: "42",
+    sessionTokenId: "demo-session:req-safe-001",
+    requestBody: "SENSITIVE-requestBody",
+    responseBody: "SENSITIVE-responseBody",
+    promptText: "SENSITIVE-promptText",
+    body: "SENSITIVE-body",
+    prompt: "SENSITIVE-prompt",
+    response: "SENSITIVE-response",
+    CoT: "SENSITIVE-CoT",
+    chainOfThought: "SENSITIVE-chainOfThought",
+    sessionKey: "SENSITIVE-sessionKey",
+    rawSessionKey: "SENSITIVE-rawSessionKey",
+    authorization: "Bearer SENSITIVE-authorization",
+    apiKey: "SENSITIVE-apiKey",
+    token: "SENSITIVE-token",
+    secret: "SENSITIVE-secret",
+  };
+  const expectedKindFields = {
+    CONTROL_PLANE: ["revisionId"],
+    ACCESS: ["bodyBytes", "sessionTokenId"],
+    SECURITY: ["incidentId", "policyId"],
+    RUNTIME: ["instanceId", "replacementInstanceId"],
+  } as const;
+
+  for (const [kind, expectedFields] of Object.entries(expectedKindFields)) {
+    const sanitized = sanitizeAuditDetails(kind, sensitiveDetails);
+    const event = {
+      id: `audit-${kind}`,
+      kind,
+      type: "TEST",
+      actor: "safe-actor",
+      targetId: "safe-target",
+      occurredAt: "2026-07-30T10:00:00.000Z",
+      summary: "safe summary",
+      details: sensitiveDetails,
+    };
+    const displayed = auditDetailsForDisplay(event);
+    const serialized = JSON.stringify({ sanitized, displayed });
+
+    assert.deepEqual(displayed, sanitized);
+    assert.ok(
+      expectedFields.every((field) =>
+        Object.prototype.hasOwnProperty.call(sanitized, field),
+      ),
+    );
+    assert.doesNotMatch(serialized, /SENSITIVE-/u);
+    assert.ok(
+      !Object.keys(sanitized).some((field) =>
+        /body$|prompt|response|cot|chainofthought|sessionkey|authorization|apikey|^token$|secret/iu.test(
+          field,
+        ),
+      ),
+    );
+  }
 });
 
 test("audit center keeps four evidence classes separate and combines exact filters", async () => {
@@ -1657,6 +1877,56 @@ test("audit center keeps four evidence classes separate and combines exact filte
   assert.ok(
     runtime.every((event: { kind: string }) => event.kind === "RUNTIME"),
   );
+});
+
+test("24h audit window is anchored to the complete collection before exact correlation", async () => {
+  const governance = await governanceModule();
+  const filterAuditCenterEvents = Reflect.get(
+    governance,
+    "filterAuditCenterEvents",
+  );
+  assert.equal(typeof filterAuditCenterEvents, "function");
+  const events = [
+    {
+      id: "audit-old",
+      kind: "ACCESS",
+      type: "ACCESS_TEST",
+      actor: "access-client:old",
+      targetId: "ins-old",
+      occurredAt: "2026-07-20T10:00:00.000Z",
+      summary: "old correlated request",
+      details: {
+        requestId: "req-old",
+        environmentId: "env-old",
+        decision: "ALLOW",
+      },
+    },
+    {
+      id: "audit-now",
+      kind: "ACCESS",
+      type: "ACCESS_TEST",
+      actor: "access-client:new",
+      targetId: "ins-new",
+      occurredAt: "2026-07-30T10:00:00.000Z",
+      summary: "latest mock request",
+      details: {
+        requestId: "req-now",
+        environmentId: "env-new",
+        decision: "ALLOW",
+      },
+    },
+  ];
+
+  const rows = filterAuditCenterEvents(events, {
+    category: "access",
+    timeRange: "24h",
+    actor: "",
+    environmentId: "",
+    result: "",
+    correlation: "req-old",
+  });
+
+  assert.deepEqual(rows, []);
 });
 
 test("application logs use their own filters instead of appearing as audit events", async () => {
@@ -1893,7 +2163,7 @@ test("hydration removes legacy raw access body and session identity before state
   assert.match(
     hydrated.auditEvents.find((event) => event.id === accessEvent.id)?.actor ??
       "",
-    /^session:/u,
+    /^access-client:/u,
   );
 });
 
@@ -1930,5 +2200,35 @@ test("hydration purges legacy CoT and rawSessionKey aliases from access audit de
     Object.values(hydratedEvent.details).join(" "),
     /LEGACY-PRIVATE-REASONING|legacy-raw-session-2048/u,
   );
-  assert.match(hydratedEvent.actor, /^session:/u);
+  assert.match(hydratedEvent.actor, /^access-client:/u);
+});
+
+test("hydration applies per-kind allowlists to non-access audit aliases", async () => {
+  const { createInitialDemoState, hydrateDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const legacy = createInitialDemoState();
+  for (const event of legacy.auditEvents) {
+    event.details = {
+      ...event.details,
+      requestBody: `SENSITIVE-${event.kind}-request`,
+      responseBody: `SENSITIVE-${event.kind}-response`,
+      authorization: `Bearer SENSITIVE-${event.kind}`,
+      apiKey: `SENSITIVE-${event.kind}-key`,
+      token: `SENSITIVE-${event.kind}-token`,
+      secret: `SENSITIVE-${event.kind}-secret`,
+    };
+  }
+
+  const hydrated = hydrateDemoState(JSON.stringify(legacy));
+  const serialized = JSON.stringify(hydrated.auditEvents);
+
+  assert.doesNotMatch(serialized, /SENSITIVE-/u);
+  assert.ok(
+    hydrated.auditEvents.every((event) =>
+      ["requestId", "operationId", "taskId"].every(
+        (field) => field in event.details,
+      ),
+    ),
+  );
 });

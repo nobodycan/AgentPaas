@@ -27,7 +27,8 @@ import type {
 import { selectInstance } from "./demo-engine.ts";
 import {
   createAccessAuditMetadata,
-  pseudonymousAccessActor,
+  sanitizeAuditEvents,
+  syntheticAccessActor,
 } from "./governance-view-models.ts";
 import {
   createAccessRequestSnapshot,
@@ -234,7 +235,13 @@ export function DemoProvider({
     }
 
     try {
-      window.localStorage.setItem(DEMO_STORAGE_KEY, JSON.stringify(state));
+      window.localStorage.setItem(
+        DEMO_STORAGE_KEY,
+        JSON.stringify({
+          ...state,
+          auditEvents: sanitizeAuditEvents(state.auditEvents),
+        }),
+      );
     } catch {
       // The in-memory demo remains usable when storage is disabled or full.
     }
@@ -359,7 +366,7 @@ export function DemoProvider({
         id: auditEventId,
         kind: "ACCESS",
         type: "ACCESS_TEST",
-        actor: pseudonymousAccessActor(submittedRequest.sessionKey),
+        actor: syntheticAccessActor(requestId),
         targetId: instanceId ?? environmentId,
         occurredAt: providerTimestamp(current.auditEvents.length),
         summary: result.message,
@@ -376,7 +383,7 @@ export function DemoProvider({
           destination: submittedRequest.path,
           ...Object.fromEntries(
             Object.entries(
-              createAccessAuditMetadata(submittedRequest),
+              createAccessAuditMetadata(submittedRequest, { requestId }),
             ).map(([key, value]) => [key, String(value)]),
           ),
           decision: policyDecision.decision,

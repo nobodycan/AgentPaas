@@ -4,6 +4,7 @@ import type {
   AccessResult,
   AuditEvent,
   Environment,
+  Instance,
   Revision,
 } from "./types.ts";
 
@@ -13,6 +14,43 @@ export const ACCESS_RESPONSE_TOKENS = [
   "当前请求已通过入口策略，",
   "并由同一会话尽力亲和到 Ready 实例。",
 ] as const;
+
+export function deriveActiveRevisionId(
+  environmentId: string,
+  instances: readonly Pick<
+    Instance,
+    "environmentId" | "revisionId" | "status"
+  >[],
+  fallback: string,
+): string {
+  const readyRevisionCounts = new Map<string, number>();
+
+  for (const instance of instances) {
+    if (
+      instance.environmentId !== environmentId ||
+      instance.status !== "Ready"
+    ) {
+      continue;
+    }
+
+    readyRevisionCounts.set(
+      instance.revisionId,
+      (readyRevisionCounts.get(instance.revisionId) ?? 0) + 1,
+    );
+  }
+
+  return (
+    [...readyRevisionCounts.entries()].sort(
+      ([leftRevisionId, leftCount], [rightRevisionId, rightCount]) =>
+        rightCount - leftCount ||
+        (leftRevisionId < rightRevisionId
+          ? -1
+          : leftRevisionId > rightRevisionId
+            ? 1
+            : 0),
+    )[0]?.[0] ?? fallback
+  );
+}
 
 export function createAccessRequestSnapshot(
   input: AccessRequestSnapshot,

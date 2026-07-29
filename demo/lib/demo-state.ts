@@ -4,8 +4,7 @@ import {
   rollbackRevision,
 } from "./demo-engine.ts";
 import {
-  createAccessAuditMetadata,
-  pseudonymousAccessActor,
+  sanitizeAuditEvents,
 } from "./governance-view-models.ts";
 import { resolveImageDigest } from "./view-models.ts";
 import {
@@ -889,73 +888,7 @@ export function hydrateDemoState(value: unknown): DemoState {
   }
 
   const hydrated = clone(candidate);
-  hydrated.auditEvents = hydrated.auditEvents.map((event) => {
-    if (event.kind !== "ACCESS") {
-      return event;
-    }
-
-    const normalizedDetails = Object.entries(event.details).map(
-      ([key, detailValue]) => ({
-        key,
-        normalizedKey: key
-          .replace(/[-_]/gu, "")
-          .toLocaleLowerCase(),
-        detailValue,
-      }),
-    );
-    const rawSessionKey =
-      normalizedDetails.find(({ normalizedKey }) =>
-        ["sessionkey", "rawsessionkey"].includes(normalizedKey),
-      )?.detailValue ?? "";
-    const rawBody =
-      normalizedDetails.find(
-        ({ normalizedKey }) => normalizedKey === "body",
-      )?.detailValue ?? "";
-    const blockedKeys = new Set([
-      "body",
-      "prompt",
-      "response",
-      "cot",
-      "chainofthought",
-      "sessionkey",
-      "rawsessionkey",
-    ]);
-    const safeDetails = Object.fromEntries(
-      normalizedDetails
-        .filter(({ normalizedKey }) => !blockedKeys.has(normalizedKey))
-        .map(({ key, detailValue }) => [key, detailValue]),
-    );
-    const metadata = createAccessAuditMetadata({
-      method: event.details.method ?? "POST",
-      path: event.details.path ?? "/v1/chat/completions",
-      body: rawBody,
-      sessionHeaderName:
-        event.details.sessionHeaderName ?? "X-Agent-Session-ID",
-      sessionKey: rawSessionKey,
-    });
-
-    return {
-      ...event,
-      actor: rawSessionKey
-        ? pseudonymousAccessActor(rawSessionKey)
-        : event.actor.startsWith("session:")
-          ? event.actor
-          : pseudonymousAccessActor(event.actor),
-      details: {
-        ...safeDetails,
-        bodyBytes:
-          safeDetails.bodyBytes ?? String(metadata.bodyBytes),
-        bodyPresent:
-          safeDetails.bodyPresent ?? metadata.bodyPresent,
-        contentCaptured: "false",
-        sessionKeyHash:
-          safeDetails.sessionKeyHash ?? metadata.sessionKeyHash,
-        sessionKeyLength:
-          safeDetails.sessionKeyLength ??
-          String(metadata.sessionKeyLength),
-      },
-    };
-  });
+  hydrated.auditEvents = sanitizeAuditEvents(hydrated.auditEvents);
 
   return hydrated;
 }

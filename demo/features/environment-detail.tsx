@@ -12,6 +12,7 @@ import { useDemo } from "../lib/demo-store";
 import { ENVIRONMENT_TABS } from "../lib/routes";
 import type { EnvironmentTab } from "../lib/routes";
 import {
+  deriveActiveRevisionId,
   runtimePanelKey,
   securityProfileEvidence,
 } from "../lib/runtime-view-models";
@@ -99,10 +100,16 @@ function OverviewPanel({
 }): React.ReactElement {
   const {
     auditEvents,
+    instances,
     revisions,
   } = useDemo();
+  const activeRevisionId = deriveActiveRevisionId(
+    environment.id,
+    instances,
+    environment.desiredRevisionId,
+  );
   const activeRevision = revisions.find(
-    (revision) => revision.id === environment.desiredRevisionId,
+    (revision) => revision.id === activeRevisionId,
   );
   const latestRelease = revisions
     .filter((revision) => revision.environmentId === environment.id)
@@ -153,7 +160,7 @@ function OverviewPanel({
         <dl className="evidence-grid evidence-grid--overview">
           <div>
             <dt>Active Revision</dt>
-            <dd>{activeRevision?.id ?? environment.desiredRevisionId}</dd>
+            <dd>{activeRevision?.id ?? activeRevisionId}</dd>
           </div>
           <div>
             <dt>镜像</dt>

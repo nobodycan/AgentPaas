@@ -9,8 +9,10 @@ import {
 } from "../../components/ui";
 import type { DataTableColumn } from "../../components/ui";
 import {
+  auditDetailsForDisplay,
   filterApplicationLogs,
   filterAuditCenterEvents,
+  PRODUCTION_SESSION_TOKENIZATION_NOTE,
 } from "../../lib/governance-view-models";
 import type {
   ApplicationLogFilters,
@@ -54,6 +56,8 @@ function EventDetails({
 }: {
   event: AuditEvent;
 }): React.ReactElement {
+  const safeDetails = auditDetailsForDisplay(event);
+
   return (
     <div className="governance-drawer-stack">
       <div className="evidence-callout">
@@ -89,7 +93,7 @@ function EventDetails({
       <section>
         <h3>结构化证据</h3>
         <dl className="drawer-definition-list drawer-definition-list--compact">
-          {Object.entries(event.details).map(([key, value]) => (
+          {Object.entries(safeDetails).map(([key, value]) => (
             <div key={key}>
               <dt>{key}</dt>
               <dd>{value}</dd>
@@ -512,7 +516,7 @@ export function AuditCenterPage({
         )}
         <p className="governance-privacy-note">
           正文默认未采集：不持久化原始 body、prompt、response、chain-of-thought 或
-          sessionKey。
+          sessionKey。{PRODUCTION_SESSION_TOKENIZATION_NOTE}
         </p>
       </section>
 
