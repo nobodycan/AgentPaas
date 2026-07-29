@@ -26,6 +26,10 @@ import type {
 } from "./demo-state.ts";
 import { selectInstance } from "./demo-engine.ts";
 import {
+  createAccessAuditMetadata,
+  pseudonymousAccessActor,
+} from "./governance-view-models.ts";
+import {
   createAccessRequestSnapshot,
   evaluateAccessRequest,
 } from "./runtime-view-models.ts";
@@ -355,7 +359,7 @@ export function DemoProvider({
         id: auditEventId,
         kind: "ACCESS",
         type: "ACCESS_TEST",
-        actor: submittedRequest.sessionKey,
+        actor: pseudonymousAccessActor(submittedRequest.sessionKey),
         targetId: instanceId ?? environmentId,
         occurredAt: providerTimestamp(current.auditEvents.length),
         summary: result.message,
@@ -370,11 +374,11 @@ export function DemoProvider({
           instanceId: instanceId ?? "none",
           policyId: result.policyId,
           destination: submittedRequest.path,
-          method: submittedRequest.method,
-          path: submittedRequest.path,
-          body: submittedRequest.body,
-          sessionHeaderName: submittedRequest.sessionHeaderName,
-          sessionKey: submittedRequest.sessionKey,
+          ...Object.fromEntries(
+            Object.entries(
+              createAccessAuditMetadata(submittedRequest),
+            ).map(([key, value]) => [key, String(value)]),
+          ),
           decision: policyDecision.decision,
           reason: policyDecision.reason,
         },
@@ -434,15 +438,33 @@ export function DemoProvider({
 
   const advanceIsolation = useCallback(
     (incidentId = OPEN_INCIDENT_ID, step?: number) => {
-      const current = stateRef.current;
-      const nextStep =
-        step ?? (current.isolationSteps[incidentId] ?? -1) + 1;
+      const current = commit((latest) => ({
+        ...latest,
+        securityIncidents: latest.securityIncidents.map((incident) =>
+          incident.id === incidentId &&
+          incident.status !== "Contained" &&
+          incident.status !== "Resolved"
+            ? { ...incident, status: "Containing" as const }
+            : incident,
+        ),
+      }));
+      const currentStep = current.isolationSteps[incidentId] ?? 0;
+      const transitions =
+        step === undefined
+          ? Array.from(
+              { length: Math.max(0, 7 - currentStep) },
+              (_, index) => ({
+                incidentId,
+                step: currentStep + index + 1,
+              }),
+            )
+          : [{ incidentId, step }];
       scheduleIsolationTransitions(
-        [{ incidentId, step: nextStep }],
+        transitions,
         current.generation,
       );
     },
-    [scheduleIsolationTransitions],
+    [commit, scheduleIsolationTransitions],
   );
 
   const resetDemo = useCallback(() => {

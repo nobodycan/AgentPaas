@@ -608,27 +608,34 @@ test("rollbackRevision restores the stable desired revision and records an audit
   assert.deepEqual(result, rollbackRevision("rev-43", "rev-42"));
 });
 
-test("isolationStateAt completes endpoint isolation and identity revocation", () => {
-  const snapshot = isolationStateAt(5);
+test("isolationStateAt completes all seven containment actions", () => {
+  const snapshot = isolationStateAt(7);
 
   assert.equal(snapshot.endpointState, "Isolated");
+  assert.equal(snapshot.lbDrained, true);
   assert.equal(snapshot.egressBlocked, true);
   assert.equal(snapshot.workloadIdentityRevoked, true);
   assert.equal(snapshot.modelIdentityRevoked, true);
+  assert.equal(snapshot.anomalousInstanceStopped, true);
+  assert.equal(snapshot.replacementRequested, true);
 });
 
 test("isolationStateAt clamps steps and records isolation progress", () => {
   assert.deepEqual(isolationStateAt(-1), isolationStateAt(0));
   assert.equal(isolationStateAt(3.8).step, 3);
-  assert.deepEqual(isolationStateAt(99), isolationStateAt(5));
+  assert.deepEqual(isolationStateAt(99), isolationStateAt(7));
 
   assert.equal(isolationStateAt(0).endpointState, "Active");
+  assert.equal(isolationStateAt(1).lbDrained, true);
   assert.equal(isolationStateAt(1).endpointState, "Isolating");
   assert.equal(isolationStateAt(2).endpointState, "Isolated");
   assert.equal(isolationStateAt(2).egressBlocked, false);
   assert.equal(isolationStateAt(3).egressBlocked, true);
   assert.equal(isolationStateAt(4).workloadIdentityRevoked, true);
   assert.equal(isolationStateAt(4).modelIdentityRevoked, false);
+  assert.equal(isolationStateAt(5).modelIdentityRevoked, true);
+  assert.equal(isolationStateAt(6).anomalousInstanceStopped, true);
+  assert.equal(isolationStateAt(7).replacementRequested, true);
 });
 
 test("initial demo state exposes the complete deterministic control-plane dataset", async () => {
@@ -1093,10 +1100,10 @@ test("enumeratePendingTransitions returns only unfinished isolation steps", asyn
           transition.incidentId === OPEN_INCIDENT_ID,
       )
       .map((transition: { step: number }) => transition.step),
-    [3, 4, 5],
+    [3, 4, 5, 6, 7],
   );
 
-  const completed = applyIsolationStep(containing, OPEN_INCIDENT_ID, 5);
+  const completed = applyIsolationStep(containing, OPEN_INCIDENT_ID, 7);
   assert.equal(
     enumeratePendingTransitions(completed).isolations.some(
       (transition: { incidentId: string }) =>
@@ -1548,4 +1555,344 @@ test("copyEndpoint restores the previously focused element after fallback succes
       "restore-focus",
     ]);
   }
+});
+
+async function governanceModule(): Promise<Record<string, unknown>> {
+  return import("../lib/governance-view-models.ts").catch(() => ({}));
+}
+
+test("access audit metadata never stores raw request content or session identity", async () => {
+  const governance = await governanceModule();
+  const createAccessAuditMetadata = Reflect.get(
+    governance,
+    "createAccessAuditMetadata",
+  );
+  const pseudonymousAccessActor = Reflect.get(
+    governance,
+    "pseudonymousAccessActor",
+  );
+  assert.equal(typeof createAccessAuditMetadata, "function");
+  assert.equal(typeof pseudonymousAccessActor, "function");
+
+  const request = createAccessRequestSnapshot({
+    method: "POST",
+    path: "/v1/chat/completions",
+    body: '{"prompt":"TOP-SECRET-CUSTOMER-PROMPT"}',
+    sessionHeaderName: "X-Agent-Session-ID",
+    sessionKey: "private-session-key-1024",
+  });
+  const metadata = createAccessAuditMetadata(request);
+  const serialized = JSON.stringify(metadata);
+
+  assert.deepEqual(Object.keys(metadata).sort(), [
+    "bodyBytes",
+    "bodyPresent",
+    "contentCaptured",
+    "method",
+    "path",
+    "sessionHeaderName",
+    "sessionKeyHash",
+    "sessionKeyLength",
+  ]);
+  assert.equal(metadata.bodyBytes, 39);
+  assert.equal(metadata.bodyPresent, "true");
+  assert.equal(metadata.contentCaptured, "false");
+  assert.match(metadata.sessionKeyHash, /^fnv1a64:[0-9a-f]{16}$/u);
+  assert.equal(metadata.sessionKeyLength, 24);
+  assert.doesNotMatch(serialized, /TOP-SECRET|CUSTOMER-PROMPT/u);
+  assert.doesNotMatch(serialized, /private-session-key-1024/u);
+  assert.doesNotMatch(
+    pseudonymousAccessActor(request.sessionKey),
+    /private-session-key-1024/u,
+  );
+});
+
+test("audit center keeps four evidence classes separate and combines exact filters", async () => {
+  const governance = await governanceModule();
+  const filterAuditCenterEvents = Reflect.get(
+    governance,
+    "filterAuditCenterEvents",
+  );
+  assert.equal(typeof filterAuditCenterEvents, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+
+  const accessRows = filterAuditCenterEvents(state.auditEvents, {
+    category: "access",
+    timeRange: "all",
+    actor: "",
+    environmentId: "",
+    result: "",
+    correlation: "req-20260729-003",
+  });
+  assert.deepEqual(
+    accessRows.map((event: { id: string }) => event.id),
+    ["audit-access-cs-001"],
+  );
+  assert.ok(
+    accessRows.every((event: { kind: string }) => event.kind === "ACCESS"),
+  );
+
+  const deniedSecurity = filterAuditCenterEvents(state.auditEvents, {
+    category: "security",
+    timeRange: "7d",
+    actor: "policy-enforcer",
+    environmentId: "env-customer-service-prod",
+    result: "DENY",
+    correlation: "",
+  });
+  assert.deepEqual(
+    deniedSecurity.map((event: { id: string }) => event.id),
+    ["audit-security-egress-001"],
+  );
+
+  const runtime = filterAuditCenterEvents(state.auditEvents, {
+    category: "runtime",
+    timeRange: "all",
+    actor: "",
+    environmentId: "",
+    result: "",
+    correlation: "",
+  });
+  assert.ok(
+    runtime.every((event: { kind: string }) => event.kind === "RUNTIME"),
+  );
+});
+
+test("application logs use their own filters instead of appearing as audit events", async () => {
+  const governance = await governanceModule();
+  const filterApplicationLogs = Reflect.get(
+    governance,
+    "filterApplicationLogs",
+  );
+  assert.equal(typeof filterApplicationLogs, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+
+  const rows = filterApplicationLogs(state.applicationLogs, {
+    timeRange: "all",
+    level: "ERROR",
+    environmentId: "env-claims-prod",
+    instanceId: "",
+    query: "readiness",
+  });
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].environmentId, "env-claims-prod");
+  assert.equal(rows[0].level, "ERROR");
+  assert.match(rows[0].message, /readiness/iu);
+});
+
+test("security posture states credential, SecureTask, and Guardrail boundaries honestly", async () => {
+  const governance = await governanceModule();
+  const deriveSecurityPosture = Reflect.get(
+    governance,
+    "deriveSecurityPosture",
+  );
+  assert.equal(typeof deriveSecurityPosture, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+  const environment = state.environments.find(
+    (candidate) => candidate.id === "env-customer-service-prod",
+  );
+  assert.ok(environment);
+
+  const posture = deriveSecurityPosture(state, environment.id);
+  assert.equal(posture.modelCredential.status, "模型网关代持");
+  assert.match(posture.modelCredential.evidence, /不进入 Agent/u);
+  assert.equal(posture.secureTask.status, "已绑定");
+  assert.match(posture.secureTask.evidence, /分钟|数小时/u);
+  assert.equal(posture.guardrail.status, "未配置");
+  assert.match(posture.guardrail.evidence, /受控内容网关/u);
+  assert.match(posture.runtimeLimitation, /已获凭据/u);
+});
+
+test("resource pool view derives K8s capacity, workload counts, and placement risk", async () => {
+  const governance = await governanceModule();
+  const deriveResourcePoolRows = Reflect.get(
+    governance,
+    "deriveResourcePoolRows",
+  );
+  assert.equal(typeof deriveResourcePoolRows, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+
+  const rows = deriveResourcePoolRows(state);
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every((row: { kubernetesVersion: string }) =>
+    /^v1\.\d+\.\d+$/u.test(row.kubernetesVersion),
+  ));
+  assert.ok(rows.every((row: { cpu: { used: number; total: number } }) =>
+    row.cpu.used <= row.cpu.total,
+  ));
+  assert.ok(rows.every((row: { memory: { used: number; total: number } }) =>
+    row.memory.used <= row.memory.total,
+  ));
+  assert.ok(rows.every((row: { environmentCount: number }) =>
+    row.environmentCount >= 0,
+  ));
+  assert.ok(rows.every((row: { instanceCount: number }) =>
+    row.instanceCount >= 0,
+  ));
+  assert.equal(
+    rows.find((row: { id: string }) => row.id === "cluster-tenant-central")
+      ?.placementRisk,
+    "High",
+  );
+});
+
+test("profile usage reports exact environment bindings and keeps details read-only", async () => {
+  const governance = await governanceModule();
+  const deriveProfileUsage = Reflect.get(
+    governance,
+    "deriveProfileUsage",
+  );
+  assert.equal(typeof deriveProfileUsage, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const state = createInitialDemoState();
+
+  const usage = deriveProfileUsage(state, "secure-task-hardened");
+  assert.equal(usage.profile?.kind, "SECURE_TASK");
+  assert.ok(usage.environmentIds.includes("env-customer-service-prod"));
+  assert.ok(!usage.environmentIds.includes("env-knowledge-prod"));
+  assert.equal(usage.readOnly, true);
+});
+
+test("incident evidence exposes seven ordered containment actions", async () => {
+  const governance = await governanceModule();
+  const deriveIncidentEvidence = Reflect.get(
+    governance,
+    "deriveIncidentEvidence",
+  );
+  assert.equal(typeof deriveIncidentEvidence, "function");
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const { OPEN_INCIDENT_ID } = await import("../lib/mock-data.ts");
+  const initial = createInitialDemoState();
+  const completed = (
+    await import("../lib/demo-state.ts")
+  ).applyIsolationStep(initial, OPEN_INCIDENT_ID, 7);
+
+  const evidence = deriveIncidentEvidence(completed, OPEN_INCIDENT_ID);
+  assert.deepEqual(
+    evidence.actions.map((action: { key: string }) => action.key),
+    [
+      "lb-drain",
+      "endpoint-block",
+      "egress-deny",
+      "workload-identity-revoke",
+      "model-identity-revoke",
+      "anomalous-instance-stop",
+      "immutable-replacement-request",
+    ],
+  );
+  assert.ok(
+    evidence.actions.every(
+      (action: { complete: boolean; auditEventId?: string }) =>
+        action.complete && Boolean(action.auditEventId),
+    ),
+  );
+});
+
+test("containment preserves the stable endpoint, stops only the anomalous instance, and is idempotent", async () => {
+  const stateModule = await import("../lib/demo-state.ts");
+  const { OPEN_INCIDENT_ID, PRIMARY_ENVIRONMENT_ID } = await import(
+    "../lib/mock-data.ts"
+  );
+  const initial = stateModule.createInitialDemoState();
+  const beforeEnvironment = initial.environments.find(
+    (environment) => environment.id === PRIMARY_ENVIRONMENT_ID,
+  );
+  assert.ok(beforeEnvironment);
+
+  const completed = stateModule.applyIsolationStep(
+    initial,
+    OPEN_INCIDENT_ID,
+    7,
+  );
+  const afterEnvironment = completed.environments.find(
+    (environment) => environment.id === PRIMARY_ENVIRONMENT_ID,
+  );
+  const environmentInstances = completed.instances.filter(
+    (instance) => instance.environmentId === PRIMARY_ENVIRONMENT_ID,
+  );
+  const isolationAudits = completed.auditEvents.filter(
+    (event) =>
+      event.type === "ISOLATION_ACTION" &&
+      event.details.incidentId === OPEN_INCIDENT_ID,
+  );
+
+  assert.equal(afterEnvironment?.status, "Isolated");
+  assert.equal(afterEnvironment?.endpoint, beforeEnvironment.endpoint);
+  assert.equal(
+    environmentInstances.find((instance) => instance.id === "ins-cs-01")
+      ?.status,
+    "Stopped",
+  );
+  assert.ok(
+    environmentInstances
+      .filter((instance) => instance.id !== "ins-cs-01")
+      .every((instance) => instance.status === "Ready"),
+  );
+  assert.equal(isolationAudits.length, 7);
+
+  const repeated = stateModule.applyIsolationStep(
+    completed,
+    OPEN_INCIDENT_ID,
+    7,
+  );
+  assert.deepEqual(repeated, completed);
+});
+
+test("isolated environments are always denied by inbound policy evaluation", async () => {
+  const { evaluateAccessRequest } = await import(
+    "../lib/runtime-view-models.ts"
+  );
+  const { createInitialDemoState } = await import("../lib/demo-state.ts");
+  const environment = createInitialDemoState().environments.find(
+    (candidate) => candidate.id === "env-customer-service-prod",
+  );
+  assert.ok(environment);
+  const request = createAccessRequestSnapshot({
+    method: "POST",
+    path: "/v1/chat/completions",
+    body: '{"message":"hello"}',
+    sessionHeaderName: "X-Agent-Session-ID",
+    sessionKey: "demo-user-1024",
+  });
+
+  const result = evaluateAccessRequest(
+    { ...environment, status: "Isolated" },
+    request,
+    true,
+  );
+  assert.equal(result.decision, "DENY");
+  assert.match(result.reason, /隔离|阻断/u);
+});
+
+test("hydration removes legacy raw access body and session identity before state can persist again", async () => {
+  const { createInitialDemoState, hydrateDemoState } = await import(
+    "../lib/demo-state.ts"
+  );
+  const legacy = createInitialDemoState();
+  const accessEvent = legacy.auditEvents.find(
+    (event) => event.kind === "ACCESS",
+  );
+  assert.ok(accessEvent);
+  accessEvent.actor = "legacy-private-session";
+  accessEvent.details = {
+    ...accessEvent.details,
+    body: '{"prompt":"LEGACY-SECRET"}',
+    sessionKey: "legacy-private-session",
+  };
+
+  const hydrated = hydrateDemoState(JSON.stringify(legacy));
+  const serialized = JSON.stringify(hydrated.auditEvents);
+
+  assert.doesNotMatch(serialized, /LEGACY-SECRET/u);
+  assert.doesNotMatch(serialized, /legacy-private-session/u);
+  assert.match(
+    hydrated.auditEvents.find((event) => event.id === accessEvent.id)?.actor ??
+      "",
+    /^session:/u,
+  );
 });

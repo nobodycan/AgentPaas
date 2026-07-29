@@ -20,11 +20,13 @@ const DEPLOYMENT_STAGES: readonly DeploymentStage[] = [
 
 const ISOLATION_STAGES: readonly IsolationStage[] = [
   "IncidentDetected",
-  "EndpointIsolationRequested",
-  "EndpointIsolated",
-  "EgressBlocked",
+  "LoadBalancerDrained",
+  "EndpointBlocked",
+  "EgressDenied",
   "WorkloadIdentityRevoked",
   "ModelIdentityRevoked",
+  "AnomalousInstanceStopped",
+  "ImmutableReplacementRequested",
 ];
 
 const ROLLBACK_OPERATION_ID = "audit-revision-rollback-001";
@@ -126,8 +128,11 @@ export function isolationStateAt(step: number): IsolationSnapshot {
         : normalizedStep === 1
           ? "Isolating"
           : "Isolated",
+    lbDrained: normalizedStep >= 1,
     egressBlocked: normalizedStep >= 3,
     workloadIdentityRevoked: normalizedStep >= 4,
     modelIdentityRevoked: normalizedStep >= 5,
+    anomalousInstanceStopped: normalizedStep >= 6,
+    replacementRequested: normalizedStep >= 7,
   };
 }

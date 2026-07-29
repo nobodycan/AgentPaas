@@ -3,8 +3,13 @@ import {
   isolationStateAt,
   rollbackRevision,
 } from "./demo-engine.ts";
+import {
+  createAccessAuditMetadata,
+  pseudonymousAccessActor,
+} from "./governance-view-models.ts";
 import { resolveImageDigest } from "./view-models.ts";
 import {
+  MOCK_APPLICATION_LOGS,
   MOCK_AUDIT_EVENTS,
   MOCK_CLUSTERS,
   MOCK_ENVIRONMENTS,
@@ -14,6 +19,7 @@ import {
   MOCK_SECURITY_INCIDENTS,
 } from "./mock-data.ts";
 import type {
+  ApplicationLog,
   AuditEvent,
   CreateEnvironmentInput,
   DemoState,
@@ -106,6 +112,14 @@ function isOptionalString(value: unknown): value is string | undefined {
 
 function isSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value);
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0
+  );
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -251,10 +265,34 @@ function isCluster(value: unknown): boolean {
     isString(value.region) &&
     isString(value.status) &&
     new Set(["Healthy", "Degraded", "Unavailable"]).has(value.status) &&
+    isString(value.kubernetesVersion) &&
+    isNonNegativeNumber(value.cpuUsed) &&
+    isNonNegativeNumber(value.cpuTotal) &&
+    value.cpuUsed <= value.cpuTotal &&
+    isNonNegativeNumber(value.memoryUsedGiB) &&
+    isNonNegativeNumber(value.memoryTotalGiB) &&
+    value.memoryUsedGiB <= value.memoryTotalGiB &&
     isSafeInteger(value.readyCapacity) &&
     value.readyCapacity >= 0 &&
     isSafeInteger(value.totalCapacity) &&
     value.totalCapacity >= 0
+  );
+}
+
+function isApplicationLog(value: unknown): value is ApplicationLog {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    isString(value.id) &&
+    isString(value.environmentId) &&
+    isString(value.instanceId) &&
+    isString(value.level) &&
+    new Set(["INFO", "WARN", "ERROR"]).has(value.level) &&
+    isString(value.occurredAt) &&
+    isString(value.message) &&
+    isString(value.traceId)
   );
 }
 
@@ -329,10 +367,12 @@ function isHydratableState(value: unknown): value is DemoState {
     value.clusters.every(isCluster) &&
     Array.isArray(value.auditEvents) &&
     value.auditEvents.every(isAuditEvent) &&
+    Array.isArray(value.applicationLogs) &&
+    value.applicationLogs.every(isApplicationLog) &&
     Array.isArray(value.securityIncidents) &&
     value.securityIncidents.every(isSecurityIncident) &&
     isTransitionRecord(value.deploymentSteps, 7) &&
-    isTransitionRecord(value.isolationSteps, 5)
+    isTransitionRecord(value.isolationSteps, 7)
   );
 }
 
@@ -346,6 +386,7 @@ export function createInitialDemoState(): DemoState {
     profiles: [...MOCK_PROFILES],
     clusters: [...MOCK_CLUSTERS],
     auditEvents: [...MOCK_AUDIT_EVENTS],
+    applicationLogs: [...MOCK_APPLICATION_LOGS],
     securityIncidents: [...MOCK_SECURITY_INCIDENTS],
     deploymentSteps: {
       "env-customer-service-staging": 4,
@@ -577,9 +618,9 @@ export function enumeratePendingTransitions(
       return [];
     }
 
-    const currentStep = state.isolationSteps[incident.id] ?? -1;
+    const currentStep = state.isolationSteps[incident.id] ?? 0;
     return Array.from(
-      { length: Math.max(0, 5 - currentStep) },
+      { length: Math.max(0, 7 - currentStep) },
       (_, index): PendingIsolationTransition => ({
         incidentId: incident.id,
         step: currentStep + index + 1,
@@ -603,15 +644,49 @@ export function applyIsolationStep(
   }
 
   const snapshot = isolationStateAt(step);
-  const currentStep = state.isolationSteps[incidentId] ?? -1;
+  const currentStep = state.isolationSteps[incidentId] ?? 0;
   if (snapshot.step <= currentStep) {
     return state;
   }
 
-  const auditId = `audit-isolation-${incidentId}-${snapshot.step}`;
-  const auditExists = state.auditEvents.some(
-    (event) => event.id === auditId,
+  const anomalousInstanceId = incident.context?.instanceId;
+  const actionSteps = Array.from(
+    { length: snapshot.step - currentStep },
+    (_, index) => currentStep + index + 1,
   );
+  const newAuditEvents: AuditEvent[] = actionSteps.flatMap((actionStep) => {
+    const action = isolationStateAt(actionStep);
+    const auditId = `audit-isolation-${incidentId}-${actionStep}`;
+    if (state.auditEvents.some((event) => event.id === auditId)) {
+      return [];
+    }
+
+    return [
+      {
+        id: auditId,
+        kind: "SECURITY",
+        type: "ISOLATION_ACTION",
+        actor: "security-controller",
+        targetId: anomalousInstanceId ?? incident.environmentId,
+        occurredAt: deterministicTimestamp(
+          state.auditEvents.length + 300 + actionStep,
+        ),
+        summary: `Incident ${incidentId} completed ${action.stage}`,
+        details: {
+          requestId: `req-demo-isolation-${incidentId}-${actionStep}`,
+          operationId: `op-demo-isolation-${incidentId}-${actionStep}`,
+          taskId: `task-demo-isolation-${incidentId}-${actionStep}`,
+          incidentId,
+          environmentId: incident.environmentId,
+          instanceId: anomalousInstanceId ?? "unknown",
+          stage: action.stage,
+          decision: "CONTAIN",
+        },
+      },
+    ];
+  });
+  const actionAuditIds = newAuditEvents.map((event) => event.id);
+
   return {
     ...state,
     isolationSteps: {
@@ -621,49 +696,42 @@ export function applyIsolationStep(
     environments: state.environments.map((environment) =>
       environment.id === incident.environmentId &&
       snapshot.endpointState === "Isolated"
-        ? { ...environment, status: "Isolated" as const, endpoint: "" }
+        ? {
+            ...environment,
+            status: "Isolated" as const,
+            readyInstances:
+              snapshot.anomalousInstanceStopped && currentStep < 6
+                ? Math.max(0, environment.readyInstances - 1)
+                : environment.readyInstances,
+          }
         : environment,
     ),
     instances: state.instances.map((instance) =>
-      instance.environmentId === incident.environmentId &&
-      snapshot.endpointState === "Isolated"
-        ? { ...instance, status: "Isolated" as const }
-        : instance,
+      instance.id !== anomalousInstanceId
+        ? instance
+        : snapshot.anomalousInstanceStopped
+          ? { ...instance, status: "Stopped" as const }
+          : snapshot.lbDrained
+            ? { ...instance, status: "Draining" as const }
+            : instance,
     ),
     securityIncidents: state.securityIncidents.map((candidate) =>
       candidate.id === incidentId
         ? {
             ...candidate,
-            status: snapshot.modelIdentityRevoked
+            status: snapshot.replacementRequested
               ? ("Contained" as const)
               : ("Containing" as const),
+            auditEventIds: [
+              ...new Set([
+                ...candidate.auditEventIds,
+                ...actionAuditIds,
+              ]),
+            ],
           }
         : candidate,
     ),
-    auditEvents: auditExists
-      ? state.auditEvents
-      : [
-          ...state.auditEvents,
-          {
-            id: auditId,
-            kind: "SECURITY",
-            type: "ISOLATION_ADVANCED",
-            actor: "security-controller",
-            targetId: incident.environmentId,
-            occurredAt: deterministicTimestamp(
-              state.auditEvents.length + 300,
-            ),
-            summary: `Incident ${incidentId} entered ${snapshot.stage}`,
-            details: {
-              requestId: `req-demo-isolation-${incidentId}-${snapshot.step}`,
-              operationId: `op-demo-isolation-${incidentId}-${snapshot.step}`,
-              taskId: `task-demo-isolation-${incidentId}-${snapshot.step}`,
-              incidentId,
-              environmentId: incident.environmentId,
-              stage: snapshot.stage,
-            },
-          },
-        ],
+    auditEvents: [...state.auditEvents, ...newAuditEvents],
   };
 }
 
@@ -816,9 +884,64 @@ export function hydrateDemoState(value: unknown): DemoState {
     }
   }
 
-  return isHydratableState(candidate)
-    ? clone(candidate)
-    : createInitialDemoState();
+  if (!isHydratableState(candidate)) {
+    return createInitialDemoState();
+  }
+
+  const hydrated = clone(candidate);
+  hydrated.auditEvents = hydrated.auditEvents.map((event) => {
+    if (event.kind !== "ACCESS") {
+      return event;
+    }
+
+    const rawSessionKey = event.details.sessionKey ?? "";
+    const rawBody = event.details.body ?? "";
+    const blockedKeys = new Set([
+      "body",
+      "prompt",
+      "response",
+      "chainofthought",
+      "sessionkey",
+    ]);
+    const safeDetails = Object.fromEntries(
+      Object.entries(event.details).filter(
+        ([key]) =>
+          !blockedKeys.has(key.replace(/[-_]/gu, "").toLocaleLowerCase()),
+      ),
+    );
+    const metadata = createAccessAuditMetadata({
+      method: event.details.method ?? "POST",
+      path: event.details.path ?? "/v1/chat/completions",
+      body: rawBody,
+      sessionHeaderName:
+        event.details.sessionHeaderName ?? "X-Agent-Session-ID",
+      sessionKey: rawSessionKey,
+    });
+
+    return {
+      ...event,
+      actor: rawSessionKey
+        ? pseudonymousAccessActor(rawSessionKey)
+        : event.actor.startsWith("session:")
+          ? event.actor
+          : pseudonymousAccessActor(event.actor),
+      details: {
+        ...safeDetails,
+        bodyBytes:
+          safeDetails.bodyBytes ?? String(metadata.bodyBytes),
+        bodyPresent:
+          safeDetails.bodyPresent ?? metadata.bodyPresent,
+        contentCaptured: "false",
+        sessionKeyHash:
+          safeDetails.sessionKeyHash ?? metadata.sessionKeyHash,
+        sessionKeyLength:
+          safeDetails.sessionKeyLength ??
+          String(metadata.sessionKeyLength),
+      },
+    };
+  });
+
+  return hydrated;
 }
 
 export function resolveDemoStateForRender(

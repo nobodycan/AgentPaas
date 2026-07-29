@@ -58,6 +58,9 @@ export function evaluateAccessRequest(
 
   const policyId =
     environment.ingressProfileId.trim() || "unconfigured-ingress";
+  if (environment.status === "Isolated") {
+    return deniedAccess("环境已隔离，稳定 Endpoint 当前处于阻断状态", policyId);
+  }
   if (environment.status !== "Running") {
     return deniedAccess("环境状态不是 Running", policyId);
   }

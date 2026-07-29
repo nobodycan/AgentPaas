@@ -101,6 +101,11 @@ export interface Cluster {
   dedicated: true;
   region: string;
   status: ClusterStatus;
+  kubernetesVersion: string;
+  cpuUsed: number;
+  cpuTotal: number;
+  memoryUsedGiB: number;
+  memoryTotalGiB: number;
   readyCapacity: number;
   totalCapacity: number;
 }
@@ -128,6 +133,16 @@ export interface SecurityIncident {
   context?: Readonly<Record<string, string>>;
 }
 
+export interface ApplicationLog {
+  id: string;
+  environmentId: string;
+  instanceId: string;
+  level: "INFO" | "WARN" | "ERROR";
+  occurredAt: string;
+  message: string;
+  traceId: string;
+}
+
 export interface DemoState {
   schemaVersion: 1;
   generation: number;
@@ -137,6 +152,7 @@ export interface DemoState {
   profiles: Profile[];
   clusters: Cluster[];
   auditEvents: AuditEvent[];
+  applicationLogs: ApplicationLog[];
   securityIncidents: SecurityIncident[];
   deploymentSteps: Record<string, number>;
   isolationSteps: Record<string, number>;
@@ -203,11 +219,13 @@ export interface DeploymentSnapshot {
 
 export type IsolationStage =
   | "IncidentDetected"
-  | "EndpointIsolationRequested"
-  | "EndpointIsolated"
-  | "EgressBlocked"
+  | "LoadBalancerDrained"
+  | "EndpointBlocked"
+  | "EgressDenied"
   | "WorkloadIdentityRevoked"
-  | "ModelIdentityRevoked";
+  | "ModelIdentityRevoked"
+  | "AnomalousInstanceStopped"
+  | "ImmutableReplacementRequested";
 
 export type EndpointState = "Active" | "Isolating" | "Isolated";
 
@@ -215,7 +233,10 @@ export interface IsolationSnapshot {
   step: number;
   stage: IsolationStage;
   endpointState: EndpointState;
+  lbDrained: boolean;
   egressBlocked: boolean;
   workloadIdentityRevoked: boolean;
   modelIdentityRevoked: boolean;
+  anomalousInstanceStopped: boolean;
+  replacementRequested: boolean;
 }
