@@ -43,6 +43,21 @@ export function correlationFromSearch(search: string): string {
   );
 }
 
+export function auditCorrelationNavigation(
+  draftCorrelation: string,
+): {
+  draftCorrelation: string;
+  destination: string;
+} {
+  const correlation = draftCorrelation.trim();
+  return {
+    draftCorrelation: correlation,
+    destination: correlation
+      ? `/audit?correlation=${encodeURIComponent(correlation)}`
+      : "/audit",
+  };
+}
+
 export const DEMO_STEPS = [
   {
     id: "platform-overview",

@@ -147,6 +147,24 @@ test("correlationFromSearch decodes one exact correlation query value", async ()
   assert.equal(correlationFromSearch(""), "");
 });
 
+test("auditCorrelationNavigation clears both the draft and active query", async () => {
+  const routes = await import("../lib/routes.ts");
+  const auditCorrelationNavigation = Reflect.get(
+    routes,
+    "auditCorrelationNavigation",
+  );
+  assert.equal(typeof auditCorrelationNavigation, "function");
+
+  assert.deepEqual(auditCorrelationNavigation(""), {
+    draftCorrelation: "",
+    destination: "/audit",
+  });
+  assert.deepEqual(auditCorrelationNavigation(" req-demo-001 "), {
+    draftCorrelation: "req-demo-001",
+    destination: "/audit?correlation=req-demo-001",
+  });
+});
+
 test("audit correlation matches exact Request, Operation, or Task ID", async () => {
   const runtimeViewModels = await import(
     "../lib/runtime-view-models.ts"

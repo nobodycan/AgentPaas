@@ -18,6 +18,7 @@ import { OverviewPage } from "../features/overview";
 import { useDemo } from "../lib/demo-store";
 import { filterAuditEventsByCorrelation } from "../lib/runtime-view-models";
 import {
+  auditCorrelationNavigation,
   correlationFromSearch,
   isProductPath,
   parseRoute,
@@ -173,12 +174,10 @@ function AuditPanel({
           className="audit-correlation-form"
           onSubmit={(event) => {
             event.preventDefault();
-            const nextCorrelation = draftCorrelation.trim();
-            onNavigate(
-              nextCorrelation
-                ? `/audit?correlation=${encodeURIComponent(nextCorrelation)}`
-                : "/audit",
-            );
+            const navigation =
+              auditCorrelationNavigation(draftCorrelation);
+            setDraftCorrelation(navigation.draftCorrelation);
+            onNavigate(navigation.destination);
           }}
         >
           <label className="form-field">
@@ -198,7 +197,11 @@ function AuditPanel({
             type="button"
             className="button button--quiet"
             disabled={!correlation && !draftCorrelation}
-            onClick={() => onNavigate("/audit")}
+            onClick={() => {
+              const navigation = auditCorrelationNavigation("");
+              setDraftCorrelation(navigation.draftCorrelation);
+              onNavigate(navigation.destination);
+            }}
           >
             清除
           </button>
